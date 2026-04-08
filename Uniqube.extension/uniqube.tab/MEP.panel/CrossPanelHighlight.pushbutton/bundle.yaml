@@ -1,0 +1,5 @@
+title: Cross-panel MEP
+tooltip: >-
+  Group electrical panel equipment in the view, then highlight in red any ducts,
+  pipes, conduit, or cable tray that cross between Spaces/Rooms, plus their fittings.
+author: Uniqube

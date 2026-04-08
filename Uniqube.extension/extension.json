@@ -1,0 +1,7 @@
+{
+  "builtin": "False",
+  "default_enabled": true,
+  "type": "extension",
+  "name": "Uniqube",
+  "description": "Uniqube MEP coordination tools (Google Drive)"
+}
