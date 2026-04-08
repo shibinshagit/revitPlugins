@@ -1,0 +1,5 @@
+title: Panel Combine (Assembly)
+tooltip: >-
+  Create Revit assemblies from structural framing + MEP
+  grouped by BIMSF_Container (no color override). For IFC export.
+author: Uniqube

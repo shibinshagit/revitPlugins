@@ -1,0 +1,5 @@
+title: Panel Combine (Color)
+tooltip: >-
+  Group structural framing + MEP by BIMSF_Container,
+  color each panel, mark crossing MEP red, create Revit groups.
+author: Uniqube

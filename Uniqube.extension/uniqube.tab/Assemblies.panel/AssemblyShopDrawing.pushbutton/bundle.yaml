@@ -1,0 +1,5 @@
+title: Assembly + Shop Drawing
+tooltip: >-
+  Create assemblies from BIMSF_Container panels and generate
+  3D orthographic + plan detail views for each assembly.
+author: Uniqube

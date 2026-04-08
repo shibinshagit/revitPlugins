@@ -1,0 +1,5 @@
+title: Conduit Fitting Schedule
+tooltip: >-
+  Create per-panel conduit fitting schedules filtered by BIMSF_Container.
+  Excludes Standard and Bend types.
+author: Uniqube
