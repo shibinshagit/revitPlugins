@@ -1,0 +1,5 @@
+title: Group Panels
+tooltip: >-
+  Group structural framing + MEP into Revit Groups by BIMSF_Container.
+  Choose single panel or all panels. Supports linked models.
+author: Uniqube
