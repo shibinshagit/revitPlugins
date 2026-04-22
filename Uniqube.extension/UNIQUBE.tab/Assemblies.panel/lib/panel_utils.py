@@ -6,6 +6,22 @@ from System.Collections.Generic import List
 
 PARAM_NAME = "BIMSF_Container"
 
+# Fallback parameter names for Vertex BD / IFC imports that lack BIMSF_Container
+FALLBACK_PARAM_NAMES = [
+    "BIMSF_Container",
+    "MasterContainer",
+    "BIMSF_Id",
+    "IfcTag",
+    "IfcName",
+    "Mark",
+    "Assembly Name",
+]
+
+STRUCT_CATS = [
+    DB.BuiltInCategory.OST_StructuralFraming,
+    DB.BuiltInCategory.OST_StructuralColumns,
+]
+
 MEP_CATS = [
     DB.BuiltInCategory.OST_Conduit,
     DB.BuiltInCategory.OST_ConduitFitting,
@@ -20,32 +36,42 @@ def get_mep_filter():
     return DB.ElementMulticategoryFilter(List[DB.BuiltInCategory](MEP_CATS))
 
 
+def _read_panel_id(element):
+    """Try BIMSF_Container first, then fall back to IFC/Vertex BD properties."""
+    for pname in FALLBACK_PARAM_NAMES:
+        p = element.LookupParameter(pname)
+        if p and p.HasValue:
+            val = p.AsString()
+            if val and val.strip():
+                return val.strip()
+    return None
+
+
 def map_framing(doc):
-    """Return {panel_id: [element, ...]} from structural framing."""
-    all_framing = (
-        DB.FilteredElementCollector(doc)
-        .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
-        .WhereElementIsNotElementType()
-        .ToElements()
-    )
+    """Return {panel_id: [element, ...]} from host structural framing + columns."""
     panel_elements = {}
-    for beam in all_framing:
-        p_param = beam.LookupParameter(PARAM_NAME)
-        if p_param and p_param.HasValue:
-            pid = p_param.AsString()
+    for bic in STRUCT_CATS:
+        col = (
+            DB.FilteredElementCollector(doc)
+            .OfCategory(bic)
+            .WhereElementIsNotElementType()
+            .ToElements()
+        )
+        for el in col:
+            pid = _read_panel_id(el)
             if not pid:
                 continue
             if pid not in panel_elements:
                 panel_elements[pid] = []
-            panel_elements[pid].append(beam)
+            panel_elements[pid].append(el)
     return panel_elements
 
 
 def map_framing_from_links(doc):
-    """Return {panel_id: [bbox, ...]} from linked model structural framing.
+    """Return {panel_id: [(min, max), ...]} from linked model framing.
 
-    We cannot group linked elements, but we use their bounding boxes
-    to build panel zones so MEP in the host model can be assigned.
+    Reads BIMSF_Container first; falls back to IFC/Vertex BD properties.
+    Scans both Structural Framing and Structural Columns in every loaded link.
     """
     link_zones = {}
     links = (
@@ -58,19 +84,18 @@ def map_framing_from_links(doc):
         if link_doc is None:
             continue
         transform = link_inst.GetTotalTransform()
-        framing = (
-            DB.FilteredElementCollector(link_doc)
-            .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
-            .WhereElementIsNotElementType()
-            .ToElements()
-        )
-        for beam in framing:
-            p_param = beam.LookupParameter(PARAM_NAME)
-            if p_param and p_param.HasValue:
-                pid = p_param.AsString()
+        for bic in STRUCT_CATS:
+            elements = (
+                DB.FilteredElementCollector(link_doc)
+                .OfCategory(bic)
+                .WhereElementIsNotElementType()
+                .ToElements()
+            )
+            for el in elements:
+                pid = _read_panel_id(el)
                 if not pid:
                     continue
-                bbox = beam.get_BoundingBox(None)
+                bbox = el.get_BoundingBox(None)
                 if bbox is None:
                     continue
                 t_min = transform.OfPoint(bbox.Min)
