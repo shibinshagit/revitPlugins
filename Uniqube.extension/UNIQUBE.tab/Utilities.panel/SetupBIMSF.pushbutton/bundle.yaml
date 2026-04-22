@@ -1,0 +1,5 @@
+title: Setup BIMSF
+tooltip: >-
+  For Vertex BD / IFC imports: add BIMSF_Container parameter to structural
+  elements and assign panel IDs. Bind linked model first if elements are in a link.
+author: Uniqube
