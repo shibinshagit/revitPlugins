@@ -1,0 +1,6 @@
+title: IFC Panel Mapper
+tooltip: >-
+  Reads IFC assembly/panel info (IfcDecomposes, IfcElementAssembly, property sets)
+  from imported or linked IFC models and writes them into BIMSF_Container parameter.
+  No manual work needed — run once after IFC import from Vertex BD.
+author: Uniqube
