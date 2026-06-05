@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Assign global sequential Advance Position IDs to structural framing.
 
-Members with the same fingerprint (type, length, BIMSF_Data, intersection
-positions) receive the same ID. IDs are global across the entire project.
+Members with the same fingerprint receive the same ID.
+Fingerprint uses BIMSF_Data (primary) or geometric intersections (fallback).
+IDs are global across the entire project.
 """
 from pyrevit import revit, DB, forms, script
 import panel_utils as pu
@@ -76,20 +77,17 @@ def get_element_length(elem):
     return 0.0
 
 
-def get_intersection_positions(elem, panel_elements):
-    """Find relative distances along elem's centerline where other members cross.
+def get_intersection_count(elem, panel_elements):
+    """Count how many other members connect to this element (within tolerance).
 
-    Returns a sorted tuple of rounded distances from the curve start.
+    Returns the count of intersecting/nearby members as a simple integer.
+    This is used only as a fallback when BIMSF_Data is not available.
     """
     curve_a = get_element_curve(elem)
     if curve_a is None:
-        return ()
+        return 0
 
-    length_a = curve_a.Length
-    if length_a < TOLERANCE_FT:
-        return ()
-
-    positions = []
+    count = 0
     for other in panel_elements:
         if other.Id == elem.Id:
             continue
@@ -97,63 +95,106 @@ def get_intersection_positions(elem, panel_elements):
         if curve_b is None:
             continue
 
-        # Use SetComparisonResult to find closest approach
         try:
-            result = curve_a.Intersect(curve_b)
-            if result == DB.SetComparisonResult.Overlap:
-                # Curves intersect — get intersection point via projection
-                mid_b = curve_b.Evaluate(0.5, True)
-                proj = curve_a.Project(mid_b)
-                if proj:
-                    dist = _round_to_tol(proj.Parameter)
-                    positions.append(dist)
-            elif result == DB.SetComparisonResult.Disjoint:
-                # Check if close enough (within tolerance)
-                mid_b = curve_b.Evaluate(0.5, True)
-                proj = curve_a.Project(mid_b)
-                if proj and proj.Distance < TOLERANCE_FT * 3:
-                    dist = _round_to_tol(proj.Parameter)
-                    positions.append(dist)
+            mid_b = curve_b.Evaluate(0.5, True)
+            proj = curve_a.Project(mid_b)
+            if proj and proj.Distance < TOLERANCE_FT * 6:
+                count += 1
         except Exception:
-            # Fallback: project midpoint of other curve onto this curve
-            try:
-                mid_b = curve_b.Evaluate(0.5, True)
-                proj = curve_a.Project(mid_b)
-                if proj and proj.Distance < TOLERANCE_FT * 10:
-                    dist = _round_to_tol(proj.Parameter)
-                    positions.append(dist)
-            except Exception:
-                pass
+            pass
 
-    positions.sort()
-    return tuple(positions)
+    return count
 
 
 def compute_fingerprint(elem, panel_elements):
     """Compute the identity fingerprint for a structural member.
 
-    Returns (type_name, length, bimsf_data, intersection_positions).
+    Strategy:
+    - If BIMSF_Data is available, it already encodes the full stud
+      configuration (punches, dimples, connections). Use it directly
+      with type name and length. No geometric analysis needed.
+    - If BIMSF_Data is empty, fall back to type + length + connection count.
     """
-    # 1. Family type name (profile)
+    # 1. Family type name (profile like "BIMSF-SSMA-S 600S162-43")
     elem_type = doc.GetElement(elem.GetTypeId())
-    type_name = elem_type.get_Parameter(
-        DB.BuiltInParameter.ALL_MODEL_TYPE_NAME
-    ).AsString() if elem_type else ""
+    type_name = ""
+    if elem_type:
+        p = elem_type.get_Parameter(DB.BuiltInParameter.ALL_MODEL_TYPE_NAME)
+        if p:
+            type_name = p.AsString() or ""
 
-    # 2. Length
+    # 2. Length rounded to tolerance
     length = get_element_length(elem)
 
-    # 3. BIMSF_Data (encodes punch/dimple config from Vertex BD)
+    # 3. BIMSF_Data — primary discriminator
     bimsf_data = _get_param_str(elem, "BIMSF_Data")
 
-    # 4. Intersection positions (geometric dimple detection)
-    intersections = get_intersection_positions(elem, panel_elements)
+    if bimsf_data:
+        # BIMSF_Data encodes the full configuration; no need for geometry
+        return (type_name, length, bimsf_data)
+    else:
+        # Fallback: use connection count as a rough geometric discriminator
+        conn_count = get_intersection_count(elem, panel_elements)
+        return (type_name, length, "", conn_count)
 
-    return (type_name, length, bimsf_data, intersections)
+
+# ---------------------------------------------------------------------------
+# RESET functionality
+# ---------------------------------------------------------------------------
+
+def reset_position_ids():
+    """Clear Advanced Position IDs from selected panels."""
+    panel_elements = pu.map_framing(doc)
+    if not panel_elements:
+        forms.alert("No panels found.", title="UNIQUBE")
+        return
+
+    # Show only panels that HAVE assigned IDs
+    assigned_panels = {}
+    for pid, elements in panel_elements.items():
+        has_any = False
+        for elem in elements:
+            if _get_param_str(elem, POSITION_PARAM):
+                has_any = True
+                break
+        if has_any:
+            assigned_panels[pid] = elements
+
+    if not assigned_panels:
+        forms.alert(
+            "No panels have Position IDs assigned yet.",
+            title="UNIQUBE",
+        )
+        return
+
+    selected = pu.choose_panels(assigned_panels.keys())
+    if not selected:
+        return
+
+    cleared = 0
+    with revit.Transaction("UNIQUBE: Reset Position IDs"):
+        for pid in selected:
+            elements = assigned_panels.get(pid, [])
+            for elem in elements:
+                param = elem.LookupParameter(POSITION_PARAM)
+                if param and not param.IsReadOnly and param.HasValue:
+                    param.Set("")
+                    cleared += 1
+
+    forms.alert(
+        "Reset complete.\n\n"
+        "Panels cleared: {}\n"
+        "Members cleared: {}".format(len(selected), cleared),
+        title="UNIQUBE — Reset Position IDs",
+    )
 
 
-def main():
-    # Collect panels from host model
+# ---------------------------------------------------------------------------
+# ASSIGN functionality
+# ---------------------------------------------------------------------------
+
+def assign_position_ids():
+    """Main assignment logic."""
     panel_elements = pu.map_framing(doc)
 
     if not panel_elements:
@@ -171,12 +212,12 @@ def main():
 
     if not pending_panels:
         forms.alert(
-            "All panels already have Advanced Position IDs assigned.",
+            "All panels already have Advanced Position IDs assigned.\n\n"
+            "Use 'Reset IDs' to clear and re-run.",
             title="UNIQUBE",
         )
         return
 
-    # Show panel selection UI (only pending panels)
     selected = pu.choose_panels(pending_panels.keys())
     if not selected:
         return
@@ -185,18 +226,17 @@ def main():
     current_max = get_max_existing_id(doc)
     next_id = current_max + 1
 
-    # Build a global fingerprint-to-ID map from already-assigned elements
+    # Build fingerprint-to-ID map from already-assigned elements in project
     fingerprint_map = {}
     for pid, elements in panel_elements.items():
-        if pid in pending_panels and pid not in selected:
-            continue
         for elem in elements:
             existing_id = _get_param_str(elem, POSITION_PARAM)
             if existing_id:
                 try:
                     fp = compute_fingerprint(elem, elements)
+                    existing_num = int(existing_id)
                     if fp not in fingerprint_map:
-                        fingerprint_map[fp] = int(existing_id)
+                        fingerprint_map[fp] = existing_num
                 except Exception:
                     pass
 
@@ -210,10 +250,9 @@ def main():
             if not elements:
                 continue
 
-            # Compute fingerprint for each element in this panel
+            # Compute fingerprint for each unassigned element
             elem_fingerprints = []
             for elem in elements:
-                # Skip elements already assigned
                 if _get_param_str(elem, POSITION_PARAM):
                     continue
                 fp = compute_fingerprint(elem, elements)
@@ -241,11 +280,26 @@ def main():
             len(selected),
             assigned_count,
             instance_count,
-            current_max + 1,
-            next_id - 1,
+            current_max + 1 if instance_count else 0,
+            next_id - 1 if instance_count else 0,
         ),
         title="UNIQUBE — Advance Position ID",
     )
+
+
+# ---------------------------------------------------------------------------
+# Entry point — choose mode
+# ---------------------------------------------------------------------------
+
+def main():
+    action = forms.CommandSwitchWindow.show(
+        ["Assign IDs", "Reset IDs"],
+        message="Advance Position ID — choose action:",
+    )
+    if action == "Assign IDs":
+        assign_position_ids()
+    elif action == "Reset IDs":
+        reset_position_ids()
 
 
 main()
