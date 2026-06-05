@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Assign global sequential Advance Position IDs to structural framing.
 
-Members with the same fingerprint (family type + length) receive the same ID.
-IDs are global across the entire project. Includes a Reset option to revert.
+Members with the same fingerprint (family type + length + BIMSF_Data)
+receive the same ID. IDs are global across the entire project.
+Includes a Reset option to revert previous assignments.
 """
 from pyrevit import revit, DB, forms, script
 import panel_utils as pu
@@ -87,12 +88,16 @@ def get_element_length(elem):
 def compute_fingerprint(elem):
     """Compute the identity fingerprint for a structural member.
 
-    Fingerprint = (family_type_name, rounded_length)
-    Two members with the same type and length are the same "instance".
+    Fingerprint = (family_type_name, rounded_length, bimsf_data)
+    Two members are the same "instance" only if all three match.
+    - Type determines the profile/gauge
+    - Length determines the cut size
+    - BIMSF_Data encodes punch/dimple configuration from Vertex BD
     """
     type_name = _get_family_type_name(elem)
     length = get_element_length(elem)
-    return (type_name, length)
+    bimsf_data = _get_param_str(elem, "BIMSF_Data")
+    return (type_name, length, bimsf_data)
 
 
 # --------------- RESET MODE ---------------
