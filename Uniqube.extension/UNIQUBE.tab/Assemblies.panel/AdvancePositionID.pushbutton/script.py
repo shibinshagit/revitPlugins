@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """Assign global sequential Advance Position IDs to structural framing.
 
-Members with the same fingerprint receive the same ID.
-Fingerprint uses BIMSF_Data (primary) or geometric intersections (fallback).
-IDs are global across the entire project.
+Members with the same fingerprint (family type + length) receive the same ID.
+IDs are global across the entire project. Includes a Reset option to revert.
 """
 from pyrevit import revit, DB, forms, script
 import panel_utils as pu
@@ -27,6 +26,22 @@ def _get_param_str(elem, param_name):
     if p and p.HasValue:
         return p.AsString() or ""
     return ""
+
+
+def _get_family_type_name(elem):
+    """Get the full family type name like 'BIMSF-SSMA-S 600S162-43'."""
+    elem_type = doc.GetElement(elem.GetTypeId())
+    if elem_type is None:
+        return ""
+    fam_name = elem_type.get_Parameter(
+        DB.BuiltInParameter.SYMBOL_FAMILY_NAME_PARAM
+    )
+    type_name = elem_type.get_Parameter(
+        DB.BuiltInParameter.SYMBOL_NAME_PARAM
+    )
+    fam = fam_name.AsString() if fam_name and fam_name.HasValue else ""
+    typ = type_name.AsString() if type_name and type_name.HasValue else ""
+    return "{} {}".format(fam, typ).strip()
 
 
 def get_max_existing_id(doc):
@@ -61,108 +76,49 @@ def is_panel_done(elements):
     return True
 
 
-def get_element_curve(elem):
-    """Get the LocationCurve's curve from a framing element."""
-    loc = elem.Location
-    if isinstance(loc, DB.LocationCurve):
-        return loc.Curve
-    return None
-
-
 def get_element_length(elem):
     """Get curve length rounded to tolerance."""
-    curve = get_element_curve(elem)
-    if curve:
-        return _round_to_tol(curve.Length)
+    loc = elem.Location
+    if isinstance(loc, DB.LocationCurve):
+        return _round_to_tol(loc.Curve.Length)
     return 0.0
 
 
-def get_intersection_count(elem, panel_elements):
-    """Count how many other members connect to this element (within tolerance).
-
-    Returns the count of intersecting/nearby members as a simple integer.
-    This is used only as a fallback when BIMSF_Data is not available.
-    """
-    curve_a = get_element_curve(elem)
-    if curve_a is None:
-        return 0
-
-    count = 0
-    for other in panel_elements:
-        if other.Id == elem.Id:
-            continue
-        curve_b = get_element_curve(other)
-        if curve_b is None:
-            continue
-
-        try:
-            mid_b = curve_b.Evaluate(0.5, True)
-            proj = curve_a.Project(mid_b)
-            if proj and proj.Distance < TOLERANCE_FT * 6:
-                count += 1
-        except Exception:
-            pass
-
-    return count
-
-
-def compute_fingerprint(elem, panel_elements):
+def compute_fingerprint(elem):
     """Compute the identity fingerprint for a structural member.
 
-    Strategy:
-    - If BIMSF_Data is available, it already encodes the full stud
-      configuration (punches, dimples, connections). Use it directly
-      with type name and length. No geometric analysis needed.
-    - If BIMSF_Data is empty, fall back to type + length + connection count.
+    Fingerprint = (family_type_name, rounded_length)
+    Two members with the same type and length are the same "instance".
     """
-    # 1. Family type name (profile like "BIMSF-SSMA-S 600S162-43")
-    elem_type = doc.GetElement(elem.GetTypeId())
-    type_name = ""
-    if elem_type:
-        p = elem_type.get_Parameter(DB.BuiltInParameter.ALL_MODEL_TYPE_NAME)
-        if p:
-            type_name = p.AsString() or ""
-
-    # 2. Length rounded to tolerance
+    type_name = _get_family_type_name(elem)
     length = get_element_length(elem)
-
-    # 3. BIMSF_Data — primary discriminator
-    bimsf_data = _get_param_str(elem, "BIMSF_Data")
-
-    if bimsf_data:
-        # BIMSF_Data encodes the full configuration; no need for geometry
-        return (type_name, length, bimsf_data)
-    else:
-        # Fallback: use connection count as a rough geometric discriminator
-        conn_count = get_intersection_count(elem, panel_elements)
-        return (type_name, length, "", conn_count)
+    return (type_name, length)
 
 
-# ---------------------------------------------------------------------------
-# RESET functionality
-# ---------------------------------------------------------------------------
+# --------------- RESET MODE ---------------
 
-def reset_position_ids():
+def run_reset():
     """Clear Advanced Position IDs from selected panels."""
     panel_elements = pu.map_framing(doc)
+
     if not panel_elements:
-        forms.alert("No panels found.", title="UNIQUBE")
+        forms.alert(
+            "No structural framing with '{}' found.".format(pu.PARAM_NAME),
+            title="UNIQUBE",
+        )
         return
 
-    # Show only panels that HAVE assigned IDs
+    # Find panels that have at least one assigned element
     assigned_panels = {}
     for pid, elements in panel_elements.items():
-        has_any = False
         for elem in elements:
             if _get_param_str(elem, POSITION_PARAM):
-                has_any = True
+                assigned_panels[pid] = elements
                 break
-        if has_any:
-            assigned_panels[pid] = elements
 
     if not assigned_panels:
         forms.alert(
-            "No panels have Position IDs assigned yet.",
+            "No panels have Position IDs to reset.",
             title="UNIQUBE",
         )
         return
@@ -183,18 +139,16 @@ def reset_position_ids():
 
     forms.alert(
         "Reset complete.\n\n"
-        "Panels cleared: {}\n"
+        "Panels reset: {}\n"
         "Members cleared: {}".format(len(selected), cleared),
         title="UNIQUBE — Reset Position IDs",
     )
 
 
-# ---------------------------------------------------------------------------
-# ASSIGN functionality
-# ---------------------------------------------------------------------------
+# --------------- ASSIGN MODE ---------------
 
-def assign_position_ids():
-    """Main assignment logic."""
+def run_assign():
+    """Assign Position IDs to selected panels."""
     panel_elements = pu.map_framing(doc)
 
     if not panel_elements:
@@ -213,7 +167,7 @@ def assign_position_ids():
     if not pending_panels:
         forms.alert(
             "All panels already have Advanced Position IDs assigned.\n\n"
-            "Use 'Reset IDs' to clear and re-run.",
+            "Use 'Reset Position IDs' to clear and re-run.",
             title="UNIQUBE",
         )
         return
@@ -226,18 +180,18 @@ def assign_position_ids():
     current_max = get_max_existing_id(doc)
     next_id = current_max + 1
 
-    # Build fingerprint-to-ID map from already-assigned elements in project
+    # Build fingerprint-to-ID map from already-assigned elements globally
     fingerprint_map = {}
     for pid, elements in panel_elements.items():
         for elem in elements:
             existing_id = _get_param_str(elem, POSITION_PARAM)
             if existing_id:
                 try:
-                    fp = compute_fingerprint(elem, elements)
+                    fp = compute_fingerprint(elem)
                     existing_num = int(existing_id)
                     if fp not in fingerprint_map:
                         fingerprint_map[fp] = existing_num
-                except Exception:
+                except (ValueError, TypeError):
                     pass
 
     # Process selected panels
@@ -250,16 +204,12 @@ def assign_position_ids():
             if not elements:
                 continue
 
-            # Compute fingerprint for each unassigned element
-            elem_fingerprints = []
             for elem in elements:
                 if _get_param_str(elem, POSITION_PARAM):
                     continue
-                fp = compute_fingerprint(elem, elements)
-                elem_fingerprints.append((elem, fp))
 
-            # Assign IDs
-            for elem, fp in elem_fingerprints:
+                fp = compute_fingerprint(elem)
+
                 if fp not in fingerprint_map:
                     fingerprint_map[fp] = next_id
                     next_id += 1
@@ -287,19 +237,20 @@ def assign_position_ids():
     )
 
 
-# ---------------------------------------------------------------------------
-# Entry point — choose mode
-# ---------------------------------------------------------------------------
+# --------------- MAIN ---------------
 
 def main():
     action = forms.CommandSwitchWindow.show(
-        ["Assign IDs", "Reset IDs"],
-        message="Advance Position ID — choose action:",
+        ["Assign Position IDs", "Reset Position IDs"],
+        message="Choose action:",
     )
-    if action == "Assign IDs":
-        assign_position_ids()
-    elif action == "Reset IDs":
-        reset_position_ids()
+    if not action:
+        return
+
+    if action == "Assign Position IDs":
+        run_assign()
+    elif action == "Reset Position IDs":
+        run_reset()
 
 
 main()
