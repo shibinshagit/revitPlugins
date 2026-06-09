@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """Master panel list for factory tracking - as a LIVE Revit schedule.
 
-Builds a native Revit schedule (so it stays live) grouped by panel, showing
-each panel's one-step-down components (e.g. CT003-3) with a quantity, plus
-length / height / thickness / weight. Panel names are shown in red, the
-component rows in black. Also offers a CSV download.
+Builds a native Revit schedule (so it stays live) with one row per panel
+name and a quantity. Wall panels are listed by their BIMSF_Container name
+(e.g. ELB-1001); floor trusses are listed by their assembly name (e.g.
+CT003-3, TB-1). Quantity is the number of identical panels/trusses of that
+name. Length / height / thickness / weight are per unit (per wall panel, or
+per single truss). The panel name column is shown in red. CSV download too.
 
 Because a Revit schedule can only display element parameters, the computed
 values are written into shared parameters on the framing members, then the
@@ -28,13 +30,13 @@ SCHEDULE_NAME = "UNIQUBE - Master Panel List"
 
 # Shared parameters this tool manages (all Text for clean grouping).
 UQ_PANEL = "UQ_Panel"
-UQ_COMPONENT = "UQ_Component"
+UQ_QTY = "UQ_Qty"
 UQ_LENGTH = "UQ_Length"
 UQ_HEIGHT = "UQ_Height"
 UQ_THICKNESS = "UQ_Thickness"
 UQ_WEIGHT = "UQ_Weight"
 UQ_PARAMS = [
-    UQ_PANEL, UQ_COMPONENT, UQ_LENGTH, UQ_HEIGHT, UQ_THICKNESS, UQ_WEIGHT,
+    UQ_PANEL, UQ_QTY, UQ_LENGTH, UQ_HEIGHT, UQ_THICKNESS, UQ_WEIGHT,
 ]
 
 
@@ -55,55 +57,23 @@ def _is_structural_framing(elem):
             return False
 
 
-def _assembly_of(elem):
-    try:
-        aid = elem.AssemblyInstanceId
-    except Exception:
-        return None
-    if aid is None or aid == DB.ElementId.InvalidElementId:
-        return None
-    return doc.GetElement(aid)
+def _display_name(raw):
+    """Strip the leading '*' from a panel name (e.g. *ELB-1001 -> ELB-1001)."""
+    if raw is None:
+        return ""
+    return raw.lstrip("*")
 
 
-def _panel_of(elem):
-    """Panel number: member's own container, else its assembly's container."""
-    p = elem.LookupParameter(CONTAINER_PARAM)
-    if p and p.HasValue and p.AsString():
-        return p.AsString()
-    asm = _assembly_of(elem)
-    if asm is not None:
-        cp = asm.LookupParameter(CONTAINER_PARAM)
-        if cp and cp.HasValue and cp.AsString():
-            return cp.AsString()
-    return None
+def collect_units():
+    """Collect leaf units to list.
 
-
-def _component_of(elem):
-    """One-step-down item: assembly name (e.g. CT003-3), else family type."""
-    asm = _assembly_of(elem)
-    if asm is not None:
-        try:
-            if asm.Name:
-                return asm.Name
-        except Exception:
-            pass
-    t = doc.GetElement(elem.GetTypeId())
-    if t is not None:
-        try:
-            name = DB.Element.Name.__get__(t)
-            if name:
-                return name
-        except Exception:
-            try:
-                return t.Name
-            except Exception:
-                pass
-    return "Unknown"
-
-
-def collect_panels():
-    """Return {panel_number: [framing elements]} for walls and floor trusses."""
-    panels = {}
+    Returns:
+      wall_panels: {container_name: [members]} - framing with a direct
+                   BIMSF_Container (one wall panel each).
+      truss_groups: {assembly_name: [ [members of instance], ... ]} - one
+                    list of member-lists per assembly name (floor trusses).
+    """
+    wall_panels = {}
     framing = (
         DB.FilteredElementCollector(doc)
         .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
@@ -111,11 +81,40 @@ def collect_panels():
         .ToElements()
     )
     for el in framing:
-        pid = _panel_of(el)
-        if not pid:
+        p = el.LookupParameter(CONTAINER_PARAM)
+        if p and p.HasValue and p.AsString():
+            wall_panels.setdefault(p.AsString(), []).append(el)
+
+    truss_groups = {}
+    assemblies = (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    )
+    for asm in assemblies:
+        cp = asm.LookupParameter(CONTAINER_PARAM)
+        if not (cp and cp.HasValue and cp.AsString()):
             continue
-        panels.setdefault(pid, []).append(el)
-    return panels
+        members = []
+        for mid in asm.GetMemberIds():
+            m = doc.GetElement(mid)
+            if m is None or not _is_structural_framing(m):
+                continue
+            mc = m.LookupParameter(CONTAINER_PARAM)
+            if mc and mc.HasValue and mc.AsString():
+                continue  # belongs to a wall panel, already counted
+            members.append(m)
+        if not members:
+            continue
+        try:
+            name = asm.Name
+        except Exception:
+            name = None
+        if not name:
+            name = cp.AsString()
+        truss_groups.setdefault(name, []).append(members)
+
+    return wall_panels, truss_groups
 
 
 def _panel_dims(elements):
@@ -253,36 +252,53 @@ def _set(elem, name, value):
             pass
 
 
-def populate_params(panels):
-    """Write UQ_* values onto every framing member, returns summary rows."""
+def _dims_strings(members):
+    dims = _panel_dims(members)
+    if dims is None:
+        return ("-", "-", "-")
+    return (_fmt_length(dims[0]), _fmt_length(dims[1]), _fmt_length(dims[2]))
+
+
+def _write(members, name, qty, length, height, thickness, weight):
+    for el in members:
+        _set(el, UQ_PANEL, name)
+        _set(el, UQ_QTY, qty)
+        _set(el, UQ_LENGTH, length)
+        _set(el, UQ_HEIGHT, height)
+        _set(el, UQ_THICKNESS, thickness)
+        _set(el, UQ_WEIGHT, weight)
+
+
+def populate_params(wall_panels, truss_groups):
+    """Write UQ_* values onto every framing member; return summary rows.
+
+    One row per panel name: wall panels (qty 1, panel dims) and floor
+    trusses (qty = instance count, dims of a single truss).
+    """
     summary = []
-    for pid in sorted(panels.keys()):
-        elements = panels[pid]
-        dims = _panel_dims(elements)
-        if dims is None:
-            length = height = thickness = "-"
-        else:
-            length = _fmt_length(dims[0])
-            height = _fmt_length(dims[1])
-            thickness = _fmt_length(dims[2])
-        weight = "{0:.1f}".format(_panel_weight_lb(elements))
 
-        comp_counts = {}
-        for el in elements:
-            comp = _component_of(el)
-            comp_counts[comp] = comp_counts.get(comp, 0) + 1
-            _set(el, UQ_PANEL, pid)
-            _set(el, UQ_COMPONENT, comp)
-            _set(el, UQ_LENGTH, length)
-            _set(el, UQ_HEIGHT, height)
-            _set(el, UQ_THICKNESS, thickness)
-            _set(el, UQ_WEIGHT, weight)
+    # Wall panels: one row each, qty 1.
+    for container in sorted(wall_panels.keys()):
+        members = wall_panels[container]
+        length, height, thickness = _dims_strings(members)
+        weight = "{0:.1f}".format(_panel_weight_lb(members))
+        name = _display_name(container)
+        _write(members, name, "1", length, height, thickness, weight)
+        summary.append([name, "1", length, height, thickness, weight])
 
-        for comp in sorted(comp_counts.keys()):
-            summary.append([
-                pid, comp, comp_counts[comp],
-                length, height, thickness, weight,
-            ])
+    # Floor trusses: one row per assembly name, qty = number of instances,
+    # dims/weight from a single instance.
+    for raw_name in sorted(truss_groups.keys()):
+        instances = truss_groups[raw_name]
+        qty = len(instances)
+        one = instances[0]
+        length, height, thickness = _dims_strings(one)
+        weight = "{0:.1f}".format(_panel_weight_lb(one))
+        name = _display_name(raw_name)
+        for members in instances:
+            _write(members, name, str(qty), length, height, thickness, weight)
+        summary.append([name, str(qty), length, height, thickness, weight])
+
     return summary
 
 
@@ -343,8 +359,7 @@ def build_schedule():
     sched_fields = defn.GetSchedulableFields()
 
     panel_field = _add_field(defn, sched_fields, UQ_PANEL)
-    comp_field = _add_field(defn, sched_fields, UQ_COMPONENT)
-    count_field = _add_field(defn, sched_fields, "Count")
+    _add_field(defn, sched_fields, UQ_QTY)
     _add_field(defn, sched_fields, UQ_LENGTH)
     _add_field(defn, sched_fields, UQ_HEIGHT)
     _add_field(defn, sched_fields, UQ_THICKNESS)
@@ -357,20 +372,15 @@ def build_schedule():
                 panel_field.FieldId, DB.ScheduleFilterType.HasValue
             )
         )
-
-    if panel_field:
-        sgf = DB.ScheduleSortGroupField(panel_field.FieldId)
-        sgf.ShowHeader = True
-        defn.AddSortGroupField(sgf)
-    if comp_field:
-        defn.AddSortGroupField(DB.ScheduleSortGroupField(comp_field.FieldId))
+        # Sort by panel name; not itemized collapses each name to one row.
+        defn.AddSortGroupField(DB.ScheduleSortGroupField(panel_field.FieldId))
 
     defn.IsItemized = False
     return sched, panel_field
 
 
 def color_panel_red(sched):
-    """Best-effort: render the panel column / header rows in red."""
+    """Render the panel-name column (column 0) in red for every row."""
     try:
         red = DB.Color(255, 0, 0)
         style = DB.TableCellStyle()
@@ -382,17 +392,8 @@ def color_panel_red(sched):
         td = sched.GetTableData()
         body = td.GetSectionData(DB.SectionType.Body)
         n_rows = body.NumberOfRows
-        n_cols = body.NumberOfColumns
         for r in range(n_rows):
-            # Header rows (grouped panel) have the panel value but a blank
-            # Count cell; color those entire rows red.
-            panel_text = sched.GetCellText(DB.SectionType.Body, r, 0)
-            count_text = ""
-            if n_cols > 2:
-                count_text = sched.GetCellText(DB.SectionType.Body, r, 2)
-            if panel_text and not count_text:
-                for c in range(n_cols):
-                    body.SetCellStyle(r, c, style)
+            body.SetCellStyle(r, 0, style)
     except Exception as ex:
         logger.debug("Coloring failed (non-fatal): %s", ex)
 
@@ -455,8 +456,8 @@ class MasterPanelWindow(forms.WPFWindow):
 # --------------- main ---------------
 
 def main():
-    panels = collect_panels()
-    if not panels:
+    wall_panels, truss_groups = collect_units()
+    if not wall_panels and not truss_groups:
         forms.alert(
             "No panels with '{}' found.".format(CONTAINER_PARAM),
             title="UNIQUBE",
@@ -464,7 +465,7 @@ def main():
         return
 
     headers = [
-        "panel number", "component", "qty",
+        "panel name", "qty",
         "length", "height", "thickness", "weight (lb)",
     ]
 
@@ -475,7 +476,7 @@ def main():
                 title="UNIQUBE",
             )
             return
-        summary = populate_params(panels)
+        summary = populate_params(wall_panels, truss_groups)
         sched, _panel_field = build_schedule()
         color_panel_red(sched)
 
