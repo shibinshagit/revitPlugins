@@ -130,35 +130,6 @@ def _bbox_diag(pts):
     return mn.DistanceTo(mx)
 
 
-def get_geometry_signature(elem):
-    """Return a coarse signature based on the element's solid geometry.
-
-    Counts solid faces and edges and sums the volume. Catches added or
-    removed features (punches, dimples) and overall material differences.
-
-    Returns (face_count, edge_count, rounded_volume) or None on failure.
-    """
-    try:
-        opts = DB.Options()
-        opts.ComputeReferences = False
-        opts.DetailLevel = DB.ViewDetailLevel.Fine
-        geo = elem.get_Geometry(opts)
-        solids = _collect_solids(geo)
-        if not solids:
-            return None
-        face_count = 0
-        edge_count = 0
-        volume = 0.0
-        for s in solids:
-            face_count += s.Faces.Size
-            edge_count += s.Edges.Size
-            volume += s.Volume
-        return (face_count, edge_count, round(volume, 6))
-    except Exception as ex:
-        logger.debug("Geometry signature failed: %s", ex)
-        return None
-
-
 def get_punch_positions(elem):
     """Return positions of punches/holes along the member's centerline.
 
@@ -234,23 +205,26 @@ def get_punch_positions(elem):
 def compute_fingerprint(elem):
     """Compute the identity fingerprint for a structural member.
 
-    Fingerprint = (type, length, geometry_signature, punch_positions)
+    Fingerprint = (type, length, punch_positions)
     Two members are the same "instance" only if all parts match.
     - Type determines the profile/gauge
-    - Length determines the cut size
-    - Geometry signature (faces, edges, volume) catches feature differences
-    - Punch positions catch the case where two studs have the SAME number of
-      punches but located at DIFFERENT spots along the length
+    - Length is the nominal centerline length (join-independent)
+    - Punch positions are each hole's distance along the member's own
+      centerline, made orientation-independent. This catches a punch being
+      removed or relocated, including the case where two studs have the same
+      number of punches but in DIFFERENT spots.
 
-    Falls back to BIMSF_Data if geometry cannot be read.
+    We deliberately do NOT use raw solid face/edge counts or volume. Members
+    that are joined/coped to neighbors (e.g. floor truss web members and
+    chords) report different geometry depending on what they connect to, so
+    those measures would wrongly split identical members. Punch positions are
+    measured along the member's centerline and are unaffected by joins, so
+    walls and floor trusses both group correctly.
     """
     type_name = _get_family_type_name(elem)
     length = get_element_length(elem)
-    geo_sig = get_geometry_signature(elem)
-    if geo_sig is None:
-        return (type_name, length, ("bimsf", _get_param_str(elem, "BIMSF_Data")))
     punches = get_punch_positions(elem)
-    return (type_name, length, geo_sig, punches)
+    return (type_name, length, punches)
 
 
 # --------------- RESET MODE ---------------
