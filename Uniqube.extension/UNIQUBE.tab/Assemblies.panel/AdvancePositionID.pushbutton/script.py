@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """Assign global sequential Advance Position IDs to structural framing.
 
-Members with the same fingerprint (family type + length + BIMSF_Data)
-receive the same ID. IDs are global across the entire project.
+Members with the same fingerprint receive the same ID. The fingerprint
+is based on real geometry (family type + length + solid faces/edges/volume),
+so studs with different punches or dimples get different IDs, while truly
+identical studs share one ID. IDs are global across the entire project.
 Includes a Reset option to revert previous assignments.
 """
 from pyrevit import revit, DB, forms, script
@@ -85,19 +87,71 @@ def get_element_length(elem):
     return 0.0
 
 
+def _collect_solids(geo_element):
+    """Yield all non-empty solids from a geometry element (handles nesting)."""
+    solids = []
+    if geo_element is None:
+        return solids
+    for g in geo_element:
+        if isinstance(g, DB.Solid):
+            if g.Volume > 0:
+                solids.append(g)
+        elif isinstance(g, DB.GeometryInstance):
+            inst_geo = g.GetInstanceGeometry()
+            solids.extend(_collect_solids(inst_geo))
+    return solids
+
+
+def get_geometry_signature(elem):
+    """Return a signature based on the element's actual solid geometry.
+
+    Counts solid faces and edges and sums the volume. Standard punches are
+    real holes in the steel and dimples are real deformations, so removing
+    or adding one changes the face/edge count and volume. Truly identical
+    studs produce an identical signature.
+
+    Returns (face_count, edge_count, rounded_volume) or None on failure.
+    """
+    try:
+        opts = DB.Options()
+        opts.ComputeReferences = False
+        opts.DetailLevel = DB.ViewDetailLevel.Fine
+        geo = elem.get_Geometry(opts)
+        solids = _collect_solids(geo)
+        if not solids:
+            return None
+        face_count = 0
+        edge_count = 0
+        volume = 0.0
+        for s in solids:
+            face_count += s.Faces.Size
+            edge_count += s.Edges.Size
+            volume += s.Volume
+        return (face_count, edge_count, round(volume, 6))
+    except Exception as ex:
+        logger.debug("Geometry signature failed: %s", ex)
+        return None
+
+
 def compute_fingerprint(elem):
     """Compute the identity fingerprint for a structural member.
 
-    Fingerprint = (family_type_name, rounded_length, bimsf_data)
-    Two members are the same "instance" only if all three match.
+    Fingerprint = (family_type_name, rounded_length, geometry_signature)
+    Two members are the same "instance" only if all parts match.
     - Type determines the profile/gauge
     - Length determines the cut size
-    - BIMSF_Data encodes punch/dimple configuration from Vertex BD
+    - Geometry signature (faces, edges, volume) captures the actual
+      punches and dimples cut into the member. Remove a punch and the
+      geometry changes, so the fingerprint changes too.
+
+    Falls back to BIMSF_Data if geometry cannot be read.
     """
     type_name = _get_family_type_name(elem)
     length = get_element_length(elem)
-    bimsf_data = _get_param_str(elem, "BIMSF_Data")
-    return (type_name, length, bimsf_data)
+    geo_sig = get_geometry_signature(elem)
+    if geo_sig is None:
+        geo_sig = ("bimsf", _get_param_str(elem, "BIMSF_Data"))
+    return (type_name, length, geo_sig)
 
 
 # --------------- RESET MODE ---------------
