@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
 """Assign global sequential Advance Position IDs to structural framing.
 
-Members with the same fingerprint receive the same ID. The fingerprint
-is based on real geometry (family type + length + solid faces/edges/volume),
-so studs with different punches or dimples get different IDs, while truly
-identical studs share one ID. IDs are global across the entire project.
-Includes a Reset option to revert previous assignments.
+Members with the same fingerprint receive the same ID. The fingerprint is
+family type + nominal length + punch positions (each hole's distance along
+the member centerline), so studs with different punches get different IDs
+while truly identical members share one ID. The fingerprint is join-
+independent, so wall studs and floor truss members both group correctly.
+IDs are global across the entire project. Includes a Reset option.
+
+Wall panels are listed by BIMSF_Container. Floor trusses are listed one
+level down, per truss assembly (by assembly name) with an instance count.
 """
 from pyrevit import revit, DB, forms, script
 import panel_utils as pu
+
+from System.Windows.Controls import CheckBox
+from System.Windows.Media import Brushes
 
 doc = revit.doc
 logger = script.get_logger()
@@ -263,6 +270,10 @@ def collect_panel_elements(doc):
         .OfClass(DB.AssemblyInstance)
         .ToElements()
     )
+
+    # Aggregate truss members by assembly name and count instances per name.
+    truss_members = {}
+    truss_counts = {}
     for asm in assemblies:
         cparam = asm.LookupParameter(pu.PARAM_NAME)
         if not (cparam and cparam.HasValue and cparam.AsString()):
@@ -284,20 +295,77 @@ def collect_panel_elements(doc):
             continue
 
         try:
-            key = asm.Name
+            name = asm.Name
         except Exception:
-            key = None
-        if not key:
-            key = cparam.AsString()
+            name = None
+        if not name:
+            name = cparam.AsString()
 
-        existing = panel_elements.setdefault(key, [])
-        existing_ids = set(e.Id for e in existing)
+        truss_counts[name] = truss_counts.get(name, 0) + 1
+        bucket = truss_members.setdefault(name, [])
+        bucket_ids = set(e.Id for e in bucket)
         for member in members:
-            if member.Id not in existing_ids:
-                existing.append(member)
-                existing_ids.add(member.Id)
+            if member.Id not in bucket_ids:
+                bucket.append(member)
+                bucket_ids.add(member.Id)
+
+    # Add truss entries with an instance count suffix, e.g. "CT003-3 [ count 2 ]".
+    for name, members in truss_members.items():
+        label = "{} [ count {} ]".format(name, truss_counts[name])
+        panel_elements[label] = members
 
     return panel_elements
+
+
+def _is_truss_key(key):
+    """Truss entries carry a '[ count N ]' suffix; wall panels do not."""
+    return "[ count " in key
+
+
+class PanelSelector(forms.WPFWindow):
+    """Checkbox list of panels. Truss entries are shown in red."""
+
+    def __init__(self, keys):
+        forms.WPFWindow.__init__(self, "SelectPanels.xaml")
+        self._checks = []
+        for key in keys:
+            cb = CheckBox()
+            cb.Content = key
+            cb.Margin = self._row_margin()
+            if _is_truss_key(key):
+                cb.Foreground = Brushes.Red
+            self.panel_stack.Children.Add(cb)
+            self._checks.append((cb, key))
+        self.selected = None
+
+    @staticmethod
+    def _row_margin():
+        from System.Windows import Thickness
+        return Thickness(2, 3, 2, 3)
+
+    def select_all_click(self, sender, args):
+        all_on = all(cb.IsChecked for cb, _ in self._checks)
+        for cb, _ in self._checks:
+            cb.IsChecked = not all_on
+
+    def ok_click(self, sender, args):
+        self.selected = [key for cb, key in self._checks if cb.IsChecked]
+        self.Close()
+
+
+def choose_panels_colored(panel_ids):
+    """Show the custom selector (truss rows in red). Falls back to the
+    standard pyRevit dialog if the custom window fails to load."""
+    keys = sorted(panel_ids)
+    if not keys:
+        return None
+    try:
+        win = PanelSelector(keys)
+        win.ShowDialog()
+        return win.selected
+    except Exception as ex:
+        logger.debug("Custom selector failed, using default: %s", ex)
+        return pu.choose_panels(panel_ids)
 
 
 # --------------- RESET MODE ---------------
@@ -328,7 +396,7 @@ def run_reset():
         )
         return
 
-    selected = pu.choose_panels(assigned_panels.keys())
+    selected = choose_panels_colored(assigned_panels.keys())
     if not selected:
         return
 
@@ -377,7 +445,7 @@ def run_assign():
         )
         return
 
-    selected = pu.choose_panels(pending_panels.keys())
+    selected = choose_panels_colored(pending_panels.keys())
     if not selected:
         return
 
