@@ -249,9 +249,12 @@ def collect_panel_elements(doc):
     """Return {panel_id: [framing element, ...]} from the host model.
 
     Includes two sources:
-    1. Framing members that carry BIMSF_Container directly (wall studs).
-    2. Members of assemblies that carry BIMSF_Container, where the container
-       lives on the assembly rather than each member (e.g. floor trusses).
+    1. Wall panels: framing members that carry BIMSF_Container directly.
+       Keyed by the container value (e.g. *ELB-1001).
+    2. Floor trusses: members of assemblies that carry BIMSF_Container but
+       where the container lives on the assembly, not each member. These are
+       grouped one level down - per individual truss assembly, keyed by the
+       assembly name (e.g. CT003-3) - rather than by the whole floor panel.
     """
     panel_elements = pu.map_framing(doc)
 
@@ -262,21 +265,37 @@ def collect_panel_elements(doc):
     )
     for asm in assemblies:
         cparam = asm.LookupParameter(pu.PARAM_NAME)
-        if not (cparam and cparam.HasValue):
+        if not (cparam and cparam.HasValue and cparam.AsString()):
             continue
-        pid = cparam.AsString()
-        if not pid:
-            continue
-        existing = panel_elements.setdefault(pid, [])
-        existing_ids = set(e.Id for e in existing)
+
+        # Only pull in members that don't already have their own container
+        # (those are wall studs already handled above). What's left are the
+        # truss members whose container only lives on the assembly.
+        members = []
         for mid in asm.GetMemberIds():
             member = doc.GetElement(mid)
             if member is None or not _is_structural_framing(member):
                 continue
-            if member.Id in existing_ids:
+            mc = member.LookupParameter(pu.PARAM_NAME)
+            if mc and mc.HasValue and mc.AsString():
                 continue
-            existing.append(member)
-            existing_ids.add(member.Id)
+            members.append(member)
+        if not members:
+            continue
+
+        try:
+            key = asm.Name
+        except Exception:
+            key = None
+        if not key:
+            key = cparam.AsString()
+
+        existing = panel_elements.setdefault(key, [])
+        existing_ids = set(e.Id for e in existing)
+        for member in members:
+            if member.Id not in existing_ids:
+                existing.append(member)
+                existing_ids.add(member.Id)
 
     return panel_elements
 
