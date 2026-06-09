@@ -102,13 +102,39 @@ def _collect_solids(geo_element):
     return solids
 
 
-def get_geometry_signature(elem):
-    """Return a signature based on the element's actual solid geometry.
+def _loop_points(curve_loop):
+    """Tessellate every curve in a loop into a flat list of XYZ points."""
+    pts = []
+    for curve in curve_loop:
+        for p in curve.Tessellate():
+            pts.append(p)
+    return pts
 
-    Counts solid faces and edges and sums the volume. Standard punches are
-    real holes in the steel and dimples are real deformations, so removing
-    or adding one changes the face/edge count and volume. Truly identical
-    studs produce an identical signature.
+
+def _centroid(pts):
+    """Average position of a list of XYZ points."""
+    n = len(pts)
+    sx = sum(p.X for p in pts)
+    sy = sum(p.Y for p in pts)
+    sz = sum(p.Z for p in pts)
+    return DB.XYZ(sx / n, sy / n, sz / n)
+
+
+def _bbox_diag(pts):
+    """Diagonal length of the bounding box around a list of points."""
+    xs = [p.X for p in pts]
+    ys = [p.Y for p in pts]
+    zs = [p.Z for p in pts]
+    mn = DB.XYZ(min(xs), min(ys), min(zs))
+    mx = DB.XYZ(max(xs), max(ys), max(zs))
+    return mn.DistanceTo(mx)
+
+
+def get_geometry_signature(elem):
+    """Return a coarse signature based on the element's solid geometry.
+
+    Counts solid faces and edges and sums the volume. Catches added or
+    removed features (punches, dimples) and overall material differences.
 
     Returns (face_count, edge_count, rounded_volume) or None on failure.
     """
@@ -133,16 +159,88 @@ def get_geometry_signature(elem):
         return None
 
 
+def get_punch_positions(elem):
+    """Return positions of punches/holes along the member's centerline.
+
+    Standard punches are through-holes in the web, which appear as inner
+    loops on the flat web faces. For each hole we take its centroid, project
+    it onto the member's centerline, and record the distance along the
+    length. The result is made orientation-independent (a stud modeled
+    start->end matches an identical stud modeled end->start) and rounded so
+    identical studs match exactly.
+
+    Two studs with the same number of punches but in DIFFERENT positions
+    produce different tuples, so they get different IDs.
+
+    Returns a sorted tuple of rounded distances, or () on failure.
+    """
+    loc = elem.Location
+    if not isinstance(loc, DB.LocationCurve):
+        return ()
+    line = loc.Curve
+    try:
+        start = line.GetEndPoint(0)
+        end = line.GetEndPoint(1)
+    except Exception:
+        return ()
+    length = start.DistanceTo(end)
+    if length < 1e-6:
+        return ()
+    direction = end.Subtract(start).Normalize()
+
+    try:
+        opts = DB.Options()
+        opts.ComputeReferences = False
+        opts.DetailLevel = DB.ViewDetailLevel.Fine
+        geo = elem.get_Geometry(opts)
+        solids = _collect_solids(geo)
+    except Exception as ex:
+        logger.debug("Punch geometry read failed: %s", ex)
+        return ()
+
+    positions = []
+    for s in solids:
+        for face in s.Faces:
+            if not isinstance(face, DB.PlanarFace):
+                continue
+            try:
+                loops = face.GetEdgesAsCurveLoops()
+            except Exception:
+                continue
+            if loops.Count < 2:
+                continue
+            loop_data = []
+            for lp in loops:
+                pts = _loop_points(lp)
+                if pts:
+                    loop_data.append((_bbox_diag(pts), _centroid(pts)))
+            if len(loop_data) < 2:
+                continue
+            # Largest loop is the outer boundary; the rest are holes.
+            loop_data.sort(key=lambda x: x[0], reverse=True)
+            for _diag, cen in loop_data[1:]:
+                dist = cen.Subtract(start).DotProduct(direction)
+                positions.append(_round_to_tol(dist))
+
+    if not positions:
+        return ()
+
+    rounded_len = _round_to_tol(length)
+    forward = tuple(sorted(positions))
+    reverse = tuple(sorted(rounded_len - d for d in positions))
+    return min(forward, reverse)
+
+
 def compute_fingerprint(elem):
     """Compute the identity fingerprint for a structural member.
 
-    Fingerprint = (family_type_name, rounded_length, geometry_signature)
+    Fingerprint = (type, length, geometry_signature, punch_positions)
     Two members are the same "instance" only if all parts match.
     - Type determines the profile/gauge
     - Length determines the cut size
-    - Geometry signature (faces, edges, volume) captures the actual
-      punches and dimples cut into the member. Remove a punch and the
-      geometry changes, so the fingerprint changes too.
+    - Geometry signature (faces, edges, volume) catches feature differences
+    - Punch positions catch the case where two studs have the SAME number of
+      punches but located at DIFFERENT spots along the length
 
     Falls back to BIMSF_Data if geometry cannot be read.
     """
@@ -150,8 +248,9 @@ def compute_fingerprint(elem):
     length = get_element_length(elem)
     geo_sig = get_geometry_signature(elem)
     if geo_sig is None:
-        geo_sig = ("bimsf", _get_param_str(elem, "BIMSF_Data"))
-    return (type_name, length, geo_sig)
+        return (type_name, length, ("bimsf", _get_param_str(elem, "BIMSF_Data")))
+    punches = get_punch_positions(elem)
+    return (type_name, length, geo_sig, punches)
 
 
 # --------------- RESET MODE ---------------
