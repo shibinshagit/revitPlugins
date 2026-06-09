@@ -298,16 +298,47 @@ def _add_field(defn, sched_fields, name, hidden=False):
     return None
 
 
+def _clear_schedule(sched):
+    """Strip a schedule's fields, sorting, and filters so it can be rebuilt.
+
+    Reusing the schedule (instead of delete + recreate) avoids the
+    'ElementId cannot be deleted' error when it is the active view.
+    """
+    defn = sched.Definition
+    try:
+        defn.ClearFilters()
+    except Exception:
+        pass
+    try:
+        for i in range(defn.GetSortGroupFieldCount() - 1, -1, -1):
+            defn.RemoveSortGroupField(i)
+    except Exception:
+        pass
+    try:
+        for fid in list(defn.GetFieldOrder()):
+            try:
+                defn.RemoveField(fid)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def build_schedule():
+    sched = None
     for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSchedule):
         if s.Name == SCHEDULE_NAME:
-            doc.Delete(s.Id)
+            sched = s
             break
 
-    sched = DB.ViewSchedule.CreateSchedule(
-        doc, DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
-    )
-    sched.Name = SCHEDULE_NAME
+    if sched is None:
+        sched = DB.ViewSchedule.CreateSchedule(
+            doc, DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
+        )
+        sched.Name = SCHEDULE_NAME
+    else:
+        _clear_schedule(sched)
+
     defn = sched.Definition
     sched_fields = defn.GetSchedulableFields()
 
