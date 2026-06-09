@@ -11,11 +11,15 @@ values are written into shared parameters on the framing members, then the
 schedule is built from them. Re-run the button to refresh after changes.
 """
 import os
+import clr
 from pyrevit import revit, DB, forms, script
+
+clr.AddReference("System.Data")
+from System.Data import DataTable
+from System import Array, Object
 
 doc = revit.doc
 app = doc.Application
-output = script.get_output()
 logger = script.get_logger()
 
 CONTAINER_PARAM = "BIMSF_Container"
@@ -379,6 +383,44 @@ def export_csv(headers, rows):
     return save_path
 
 
+# --------------- viewer window ---------------
+
+class MasterPanelWindow(forms.WPFWindow):
+    """Shows the panel list. Download and navigation only fire on their buttons."""
+
+    def __init__(self, headers, rows, sched):
+        forms.WPFWindow.__init__(self, "MasterPanelView.xaml")
+        self._headers = headers
+        self._rows = rows
+        self._sched = sched
+
+        table = DataTable()
+        for h in headers:
+            table.Columns.Add(h)
+        for r in rows:
+            arr = Array[Object]([u"{}".format(c) for c in r])
+            table.Rows.Add(arr)
+        self.grid.ItemsSource = table.DefaultView
+
+    def download_click(self, sender, args):
+        try:
+            saved = export_csv(self._headers, self._rows)
+            if saved:
+                forms.alert("CSV saved:\n{}".format(saved), title="UNIQUBE")
+        except Exception as ex:
+            forms.alert("Could not write CSV:\n{}".format(ex), title="UNIQUBE")
+
+    def goto_click(self, sender, args):
+        self.Close()
+        try:
+            revit.active_view = self._sched
+        except Exception as ex:
+            logger.debug("Go to schedule failed: %s", ex)
+
+    def close_click(self, sender, args):
+        self.Close()
+
+
 # --------------- main ---------------
 
 def main():
@@ -406,22 +448,7 @@ def main():
         sched, _panel_field = build_schedule()
         color_panel_red(sched)
 
-    output.print_md("# UNIQUBE - Master Panel List")
-    output.print_table(table_data=summary, columns=headers)
-
-    saved = export_csv(headers, summary)
-
-    msg = "Live schedule created: '{}'.\nPanels: {}".format(
-        SCHEDULE_NAME, len(panels)
-    )
-    if saved:
-        msg += "\nCSV saved: {}".format(saved)
-    forms.alert(msg, title="UNIQUBE - Master Panel List")
-
-    try:
-        revit.active_view = sched
-    except Exception:
-        pass
+    MasterPanelWindow(headers, summary, sched).ShowDialog()
 
 
 main()
