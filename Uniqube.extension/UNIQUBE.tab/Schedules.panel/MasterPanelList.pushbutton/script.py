@@ -398,23 +398,6 @@ def color_panel_red(sched):
         logger.debug("Coloring failed (non-fatal): %s", ex)
 
 
-def _csv_field(value):
-    text = u"{}".format(value)
-    return u'"' + text.replace(u'"', u'""') + u'"'
-
-
-def export_csv(headers, rows):
-    save_path = forms.save_file(file_ext="csv", default_name="MasterPanelList")
-    if not save_path:
-        return None
-    import codecs
-    with codecs.open(save_path, "w", encoding="utf-8-sig") as f:
-        f.write(u",".join(_csv_field(h) for h in headers) + u"\n")
-        for row in rows:
-            f.write(u",".join(_csv_field(c) for c in row) + u"\n")
-    return save_path
-
-
 # --------------- viewer window ---------------
 
 class MasterPanelWindow(forms.WPFWindow):
@@ -433,14 +416,6 @@ class MasterPanelWindow(forms.WPFWindow):
             arr = Array[Object]([u"{}".format(c) for c in r])
             table.Rows.Add(arr)
         self.grid.ItemsSource = table.DefaultView
-
-    def download_click(self, sender, args):
-        try:
-            saved = export_csv(self._headers, self._rows)
-            if saved:
-                forms.alert("CSV saved:\n{}".format(saved), title="UNIQUBE")
-        except Exception as ex:
-            forms.alert("Could not write CSV:\n{}".format(ex), title="UNIQUBE")
 
     def goto_click(self, sender, args):
         self.Close()
