@@ -227,11 +227,65 @@ def compute_fingerprint(elem):
     return (type_name, length, punches)
 
 
+# --------------- PANEL COLLECTION ---------------
+
+def _is_structural_framing(elem):
+    """True if the element is in the Structural Framing category."""
+    cat = elem.Category
+    if cat is None:
+        return False
+    try:
+        return cat.BuiltInCategory == DB.BuiltInCategory.OST_StructuralFraming
+    except Exception:
+        try:
+            return cat.Id.IntegerValue == int(
+                DB.BuiltInCategory.OST_StructuralFraming
+            )
+        except Exception:
+            return False
+
+
+def collect_panel_elements(doc):
+    """Return {panel_id: [framing element, ...]} from the host model.
+
+    Includes two sources:
+    1. Framing members that carry BIMSF_Container directly (wall studs).
+    2. Members of assemblies that carry BIMSF_Container, where the container
+       lives on the assembly rather than each member (e.g. floor trusses).
+    """
+    panel_elements = pu.map_framing(doc)
+
+    assemblies = (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    )
+    for asm in assemblies:
+        cparam = asm.LookupParameter(pu.PARAM_NAME)
+        if not (cparam and cparam.HasValue):
+            continue
+        pid = cparam.AsString()
+        if not pid:
+            continue
+        existing = panel_elements.setdefault(pid, [])
+        existing_ids = set(e.Id for e in existing)
+        for mid in asm.GetMemberIds():
+            member = doc.GetElement(mid)
+            if member is None or not _is_structural_framing(member):
+                continue
+            if member.Id in existing_ids:
+                continue
+            existing.append(member)
+            existing_ids.add(member.Id)
+
+    return panel_elements
+
+
 # --------------- RESET MODE ---------------
 
 def run_reset():
     """Clear Advanced Position IDs from selected panels."""
-    panel_elements = pu.map_framing(doc)
+    panel_elements = collect_panel_elements(doc)
 
     if not panel_elements:
         forms.alert(
@@ -281,7 +335,7 @@ def run_reset():
 
 def run_assign():
     """Assign Position IDs to selected panels."""
-    panel_elements = pu.map_framing(doc)
+    panel_elements = collect_panel_elements(doc)
 
     if not panel_elements:
         forms.alert(
