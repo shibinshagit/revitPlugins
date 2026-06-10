@@ -27,7 +27,7 @@ def main():
     if not selected:
         return
 
-    link_stats = {"link_tagged": 0, "link_readonly": 0}
+    link_stats = {"link_matched": 0}
     with revit.Transaction("UNIQUBE: Group Panels"):
         # Remove existing groups for selected panels first
         all_groups = (
@@ -72,12 +72,10 @@ def main():
         "Done.\n\n"
         "Panels selected: {}\n"
         "Groups created: {}\n"
-        "Linked elements tagged: {}\n"
-        "Linked elements read-only: {}".format(
+        "Linked elements matched (cannot group links): {}".format(
             len(selected),
             group_count,
-            link_stats.get("link_tagged", 0),
-            link_stats.get("link_readonly", 0),
+            link_stats.get("link_matched", 0),
         ),
         title="UNIQUBE — Group Panels",
     )

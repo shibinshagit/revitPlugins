@@ -157,13 +157,6 @@ def _bbox_intersects_outline(bbox, outline):
     return outline.Intersects(bb_outline, 0.001)
 
 
-def _get_container(elem):
-    p = elem.LookupParameter(PARAM_NAME)
-    if p and p.HasValue:
-        return p.AsString() or ""
-    return ""
-
-
 def _set_container(elem, pid):
     p = elem.LookupParameter(PARAM_NAME)
     if p and not p.IsReadOnly:
@@ -172,24 +165,6 @@ def _set_container(elem, pid):
             return True
         except Exception:
             return False
-    return False
-
-
-def _set_container_in_link(link_doc, elem, pid):
-    """Write BIMSF_Container on a linked-model element when editable."""
-    t = DB.Transaction(link_doc, "UNIQUBE: Set Panel Container")
-    t.Start()
-    try:
-        ok = _set_container(elem, pid)
-        if ok:
-            t.Commit()
-            return True
-        t.RollBack()
-    except Exception:
-        try:
-            t.RollBack()
-        except Exception:
-            pass
     return False
 
 
@@ -221,10 +196,13 @@ def _link_bbox_in_outline(elem, transform, outline):
 def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True):
     """Assign host + linked disciplines to panels by spatial zone.
 
+    Host elements can receive BIMSF_Container writes. Linked-model elements
+    are read-only from the host — they are returned for view coloring only.
+
     Returns:
       host_assignments: {ElementId: set(panel_ids)} for host elements
       link_assignments: list of (link_inst, elem, set(panel_ids))
-      stats: dict with counts of linked elements tagged
+      stats: dict with link_matched count (for coloring)
     """
     mep_filter = get_mep_filter()
     assign_filter = get_link_assign_filter()
@@ -259,7 +237,7 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
                 host_assignments[item.Id].add(pid)
 
     link_assignments = []
-    stats = {"link_tagged": 0, "link_readonly": 0}
+    stats = {"link_matched": 0}
 
     if assign_links and link_zones:
         links = (
@@ -279,7 +257,6 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
                 .ToElements()
             )
             for elem in candidates:
-                existing = _get_container(elem)
                 matched = set()
                 for pid, outline in panel_outlines.items():
                     if _link_bbox_in_outline(elem, transform, outline):
@@ -287,13 +264,7 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
                 if not matched:
                     continue
                 link_assignments.append((link_inst, elem, matched))
-                if len(matched) == 1:
-                    pid = list(matched)[0]
-                    if existing != pid:
-                        if _set_container_in_link(link_doc, elem, pid):
-                            stats["link_tagged"] += 1
-                        else:
-                            stats["link_readonly"] += 1
+                stats["link_matched"] += 1
 
     return host_assignments, link_assignments, stats
 

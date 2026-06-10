@@ -34,7 +34,7 @@ def main():
     if not selected:
         return
 
-    link_stats = {"link_tagged": 0, "link_readonly": 0}
+    link_stats = {"link_matched": 0}
     with revit.Transaction("UNIQUBE: Panel Combine (Color)"):
         # Cleanup existing BIMSF groups for selected panels
         all_groups = (
@@ -121,11 +121,11 @@ def main():
         "Panels processed: {}\n"
         "Groups created: {}\n"
         "Crossing elements (red): {}\n"
-        "Linked elements tagged: {}".format(
+        "Linked elements colored in view: {}".format(
             len(selected),
             group_count,
             crossing_count,
-            link_stats.get("link_tagged", 0),
+            link_stats.get("link_matched", 0),
         ),
         title="UNIQUBE — Panel Combine",
     )

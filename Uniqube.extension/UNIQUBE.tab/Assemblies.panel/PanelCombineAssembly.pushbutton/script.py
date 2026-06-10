@@ -74,10 +74,10 @@ def main():
 
     forms.alert(
         "Done.\n\nPanels: {}\nAssemblies created: {}\n"
-        "Linked elements tagged: {}".format(
+        "Linked elements matched (cannot assemble links): {}".format(
             len(selected),
             asm_count,
-            link_stats.get("link_tagged", 0),
+            link_stats.get("link_matched", 0),
         ),
         title="UNIQUBE — Panel Assembly",
     )
