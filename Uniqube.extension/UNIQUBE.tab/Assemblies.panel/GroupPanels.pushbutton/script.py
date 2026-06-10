@@ -27,6 +27,7 @@ def main():
     if not selected:
         return
 
+    link_stats = {"link_tagged": 0, "link_readonly": 0}
     with revit.Transaction("UNIQUBE: Group Panels"):
         # Remove existing groups for selected panels first
         all_groups = (
@@ -40,7 +41,7 @@ def main():
                     except Exception:
                         pass
 
-        mep_assignments = pu.assign_mep_to_panels(
+        mep_assignments, link_assignments, link_stats = pu.assign_mep_to_panels(
             doc, panel_elements, link_zones
         )
 
@@ -68,8 +69,15 @@ def main():
                     logger.debug("Group error for %s: %s", pid, ex)
 
     forms.alert(
-        "Done.\n\nPanels selected: {}\nGroups created: {}".format(
-            len(selected), group_count
+        "Done.\n\n"
+        "Panels selected: {}\n"
+        "Groups created: {}\n"
+        "Linked elements tagged: {}\n"
+        "Linked elements read-only: {}".format(
+            len(selected),
+            group_count,
+            link_stats.get("link_tagged", 0),
+            link_stats.get("link_readonly", 0),
         ),
         title="UNIQUBE — Group Panels",
     )

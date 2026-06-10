@@ -39,7 +39,7 @@ def main():
                     except Exception:
                         pass
 
-        mep_assignments = pu.assign_mep_to_panels(
+        mep_assignments, link_assignments, link_stats = pu.assign_mep_to_panels(
             doc, panel_elements, link_zones
         )
 
@@ -88,8 +88,12 @@ def main():
                     logger.debug("Assembly/view error for %s: %s", pid, ex)
 
     forms.alert(
-        "Done.\n\nPanels: {}\nAssemblies: {}\nViews created: {}".format(
-            len(selected), asm_count, view_count
+        "Done.\n\nPanels: {}\nAssemblies: {}\nViews created: {}\n"
+        "Linked elements tagged: {}".format(
+            len(selected),
+            asm_count,
+            view_count,
+            link_stats.get("link_tagged", 0),
         ),
         title="UNIQUBE — Shop Drawing",
     )

@@ -13,15 +13,36 @@ MEP_CATS = [
     DB.BuiltInCategory.OST_PipeFitting,
     DB.BuiltInCategory.OST_PipeInsulations,
     DB.BuiltInCategory.OST_ElectricalFixtures,
+    DB.BuiltInCategory.OST_CableTray,
+    DB.BuiltInCategory.OST_CableTrayFitting,
+    DB.BuiltInCategory.OST_DuctCurves,
+    DB.BuiltInCategory.OST_DuctFitting,
+    DB.BuiltInCategory.OST_DuctAccessory,
+    DB.BuiltInCategory.OST_FlexDuctCurves,
+    DB.BuiltInCategory.OST_FlexPipeCurves,
+    DB.BuiltInCategory.OST_LightingFixtures,
+    DB.BuiltInCategory.OST_LightingDevices,
+    DB.BuiltInCategory.OST_ElectricalEquipment,
+    DB.BuiltInCategory.OST_MechanicalEquipment,
+    DB.BuiltInCategory.OST_Sprinklers,
 ]
+
+# Host + link spatial assignment for panel grouping workflows.
+LINK_ASSIGN_CATS = MEP_CATS + [DB.BuiltInCategory.OST_StructuralFraming]
+
+ZONE_PAD_FT = 0.2
 
 
 def get_mep_filter():
     return DB.ElementMulticategoryFilter(List[DB.BuiltInCategory](MEP_CATS))
 
 
+def get_link_assign_filter():
+    return DB.ElementMulticategoryFilter(List[DB.BuiltInCategory](LINK_ASSIGN_CATS))
+
+
 def map_framing(doc):
-    """Return {panel_id: [element, ...]} from structural framing."""
+    """Return {panel_id: [element, ...]} from host structural framing."""
     all_framing = (
         DB.FilteredElementCollector(doc)
         .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
@@ -42,10 +63,11 @@ def map_framing(doc):
 
 
 def map_framing_from_links(doc):
-    """Return {panel_id: [bbox, ...]} from linked model structural framing.
+    """Return {panel_id: [(host_min, host_max), ...]} from linked framing.
 
-    We cannot group linked elements, but we use their bounding boxes
-    to build panel zones so MEP in the host model can be assigned.
+    Linked framing cannot be grouped in the host model, but its bounding
+    boxes (transformed to host coordinates) define panel zones so host and
+    linked MEP/electrical can be assigned to the same panel number.
     """
     link_zones = {}
     links = (
@@ -79,6 +101,13 @@ def map_framing_from_links(doc):
                     link_zones[pid] = []
                 link_zones[pid].append((t_min, t_max))
     return link_zones
+
+
+def get_all_panel_ids(panel_elements, link_zones=None):
+    ids = set(panel_elements.keys())
+    if link_zones:
+        ids.update(link_zones.keys())
+    return ids
 
 
 def compute_panel_bbox(elements, link_bboxes=None):
@@ -116,43 +145,167 @@ def compute_panel_bbox(elements, link_bboxes=None):
     return min_pt, max_pt
 
 
-def assign_mep_to_panels(doc, panel_elements, link_zones=None):
-    """Return {ElementId: set(panel_ids)} for MEP elements in the host model."""
+def _panel_outline(min_pt, max_pt):
+    pad = DB.XYZ(ZONE_PAD_FT, ZONE_PAD_FT, ZONE_PAD_FT)
+    return DB.Outline(min_pt.Subtract(pad), max_pt.Add(pad))
+
+
+def _bbox_intersects_outline(bbox, outline):
+    if bbox is None:
+        return False
+    bb_outline = DB.Outline(bbox.Min, bbox.Max)
+    return outline.Intersects(bb_outline, 0.001)
+
+
+def _get_container(elem):
+    p = elem.LookupParameter(PARAM_NAME)
+    if p and p.HasValue:
+        return p.AsString() or ""
+    return ""
+
+
+def _set_container(elem, pid):
+    p = elem.LookupParameter(PARAM_NAME)
+    if p and not p.IsReadOnly:
+        try:
+            p.Set(pid)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _set_container_in_link(link_doc, elem, pid):
+    """Write BIMSF_Container on a linked-model element when editable."""
+    t = DB.Transaction(link_doc, "UNIQUBE: Set Panel Container")
+    t.Start()
+    try:
+        ok = _set_container(elem, pid)
+        if ok:
+            t.Commit()
+            return True
+        t.RollBack()
+    except Exception:
+        try:
+            t.RollBack()
+        except Exception:
+            pass
+    return False
+
+
+def _host_bbox_in_outline(elem, outline):
+    bbox = elem.get_BoundingBox(None)
+    return _bbox_intersects_outline(bbox, outline)
+
+
+def _link_bbox_in_outline(elem, transform, outline):
+    bbox = elem.get_BoundingBox(None)
+    if bbox is None:
+        return False
+    t_min = transform.OfPoint(bbox.Min)
+    t_max = transform.OfPoint(bbox.Max)
+    host_bb = DB.BoundingBoxXYZ()
+    host_bb.Min = DB.XYZ(
+        min(t_min.X, t_max.X),
+        min(t_min.Y, t_max.Y),
+        min(t_min.Z, t_max.Z),
+    )
+    host_bb.Max = DB.XYZ(
+        max(t_min.X, t_max.X),
+        max(t_min.Y, t_max.Y),
+        max(t_min.Z, t_max.Z),
+    )
+    return _bbox_intersects_outline(host_bb, outline)
+
+
+def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True):
+    """Assign host + linked disciplines to panels by spatial zone.
+
+    Returns:
+      host_assignments: {ElementId: set(panel_ids)} for host elements
+      link_assignments: list of (link_inst, elem, set(panel_ids))
+      stats: dict with counts of linked elements tagged
+    """
     mep_filter = get_mep_filter()
+    assign_filter = get_link_assign_filter()
+
     all_mep = (
         DB.FilteredElementCollector(doc)
         .WherePasses(mep_filter)
         .WhereElementIsNotElementType()
         .ToElements()
     )
-    mep_assignments = {}
+    host_assignments = {}
     for item in all_mep:
-        mep_assignments[item.Id] = set()
+        host_assignments[item.Id] = set()
 
-    all_pids = set(panel_elements.keys())
-    if link_zones:
-        all_pids.update(link_zones.keys())
-
+    all_pids = get_all_panel_ids(panel_elements, link_zones)
+    panel_outlines = {}
     for pid in all_pids:
         host_elements = panel_elements.get(pid, [])
         lz = link_zones.get(pid, []) if link_zones else []
         min_pt, max_pt = compute_panel_bbox(host_elements, lz)
+        panel_outlines[pid] = _panel_outline(min_pt, max_pt)
 
-        zone = DB.Outline(
-            min_pt.Add(DB.XYZ(-0.2, -0.2, -0.2)),
-            max_pt.Add(DB.XYZ(0.2, 0.2, 0.2)),
-        )
+    for pid, outline in panel_outlines.items():
         nearby = (
             DB.FilteredElementCollector(doc)
             .WherePasses(mep_filter)
-            .WherePasses(DB.BoundingBoxIntersectsFilter(zone))
+            .WherePasses(DB.BoundingBoxIntersectsFilter(outline))
             .ToElements()
         )
         for item in nearby:
-            if item.Id in mep_assignments:
-                mep_assignments[item.Id].add(pid)
+            if item.Id in host_assignments:
+                host_assignments[item.Id].add(pid)
 
-    return mep_assignments
+    link_assignments = []
+    stats = {"link_tagged": 0, "link_readonly": 0}
+
+    if assign_links and link_zones:
+        links = (
+            DB.FilteredElementCollector(doc)
+            .OfClass(DB.RevitLinkInstance)
+            .ToElements()
+        )
+        for link_inst in links:
+            link_doc = link_inst.GetLinkDocument()
+            if link_doc is None:
+                continue
+            transform = link_inst.GetTotalTransform()
+            candidates = (
+                DB.FilteredElementCollector(link_doc)
+                .WherePasses(assign_filter)
+                .WhereElementIsNotElementType()
+                .ToElements()
+            )
+            for elem in candidates:
+                existing = _get_container(elem)
+                matched = set()
+                for pid, outline in panel_outlines.items():
+                    if _link_bbox_in_outline(elem, transform, outline):
+                        matched.add(pid)
+                if not matched:
+                    continue
+                link_assignments.append((link_inst, elem, matched))
+                if len(matched) == 1:
+                    pid = list(matched)[0]
+                    if existing != pid:
+                        if _set_container_in_link(link_doc, elem, pid):
+                            stats["link_tagged"] += 1
+                        else:
+                            stats["link_readonly"] += 1
+
+    return host_assignments, link_assignments, stats
+
+
+def set_link_element_override(view, link_inst, elem, override_settings):
+    """Apply a graphic override to one element inside a linked model."""
+    try:
+        link_id = DB.LinkElementId(link_inst.Id, elem.Id)
+        view.SetElementOverrides(link_id, override_settings)
+        return True
+    except Exception:
+        return False
 
 
 def choose_panels(panel_ids):

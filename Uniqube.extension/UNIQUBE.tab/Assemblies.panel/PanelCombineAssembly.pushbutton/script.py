@@ -39,7 +39,7 @@ def main():
                     except Exception:
                         pass
 
-        mep_assignments = pu.assign_mep_to_panels(
+        mep_assignments, link_assignments, link_stats = pu.assign_mep_to_panels(
             doc, panel_elements, link_zones
         )
 
@@ -73,8 +73,11 @@ def main():
                     pass
 
     forms.alert(
-        "Done.\n\nPanels: {}\nAssemblies created: {}".format(
-            len(selected), asm_count
+        "Done.\n\nPanels: {}\nAssemblies created: {}\n"
+        "Linked elements tagged: {}".format(
+            len(selected),
+            asm_count,
+            link_stats.get("link_tagged", 0),
         ),
         title="UNIQUBE — Panel Assembly",
     )

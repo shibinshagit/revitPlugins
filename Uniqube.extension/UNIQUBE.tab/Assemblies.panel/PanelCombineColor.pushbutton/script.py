@@ -34,6 +34,7 @@ def main():
     if not selected:
         return
 
+    link_stats = {"link_tagged": 0, "link_readonly": 0}
     with revit.Transaction("UNIQUBE: Panel Combine (Color)"):
         # Cleanup existing BIMSF groups for selected panels
         all_groups = (
@@ -47,7 +48,7 @@ def main():
                     except Exception:
                         pass
 
-        mep_assignments = pu.assign_mep_to_panels(
+        mep_assignments, link_assignments, link_stats = pu.assign_mep_to_panels(
             doc, panel_elements, link_zones
         )
 
@@ -100,6 +101,13 @@ def main():
                     if p_param and not p_param.IsReadOnly:
                         p_param.Set("")
 
+            for link_inst, elem, pids in link_assignments:
+                if len(pids) == 1 and list(pids)[0] == pid:
+                    pu.set_link_element_override(view, link_inst, elem, p_settings)
+                elif len(pids) > 1 and pid in pids:
+                    pu.set_link_element_override(view, link_inst, elem, red_settings)
+                    crossing_count += 1
+
             if group_ids.Count > 1:
                 try:
                     new_grp = doc.Create.NewGroup(group_ids)
@@ -112,8 +120,12 @@ def main():
         "Done.\n\n"
         "Panels processed: {}\n"
         "Groups created: {}\n"
-        "Crossing MEP elements (red): {}".format(
-            len(selected), group_count, crossing_count
+        "Crossing elements (red): {}\n"
+        "Linked elements tagged: {}".format(
+            len(selected),
+            group_count,
+            crossing_count,
+            link_stats.get("link_tagged", 0),
         ),
         title="UNIQUBE — Panel Combine",
     )
