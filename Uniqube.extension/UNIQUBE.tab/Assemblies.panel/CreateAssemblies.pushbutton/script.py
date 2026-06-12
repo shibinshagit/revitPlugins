@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Create assemblies for panels and keep panel number = container = assembly.
+"""Make panel number = BIMSF_Container = assembly name for every panel.
 
-Actions in one run:
-1. Wall panels are auto-ungrouped first, because Revit cannot place grouped
-   elements into an assembly.
-2. Wall panels: structural framing carrying BIMSF_Container directly (and not
-   already inside an assembly) are grouped into a fresh assembly per panel.
-   The panel number, BIMSF_Container, and assembly name are all set to the
-   same value (asterisk stripped, e.g. *ELB-2001 -> ELB-2001).
-3. Trusses: members already live inside an assembly (e.g. TB-4, CT003-3). The
-   assembly name is written into each member's BIMSF_Container, so the
-   container matches the assembly name (e.g. *FT-FloorPanel2001 -> TB-4).
+The panel number is the real identifier already stored in BIMSF_Container
+(e.g. ELB-2001 for walls, FT-FloorPanel2001 for floors). This tool makes the
+assembly name and BIMSF_Container match that panel number everywhere. It
+never uses the auto truss mark (TB-6, CT003-3) as the name.
+
+Two actions in one run:
+1. Existing assemblies (e.g. trusses): read the panel number from the
+   assembly's BIMSF_Container, write it back (asterisk stripped) and rename
+   the assembly to the same value.
+2. Wall panels: framing carrying BIMSF_Container directly but not yet in an
+   assembly is grouped into a new assembly named after the panel number, with
+   BIMSF_Container set on the members and the assembly element.
 """
 from pyrevit import revit, DB, forms, script
 from System.Collections.Generic import List
@@ -43,15 +45,49 @@ def _in_assembly(elem):
     return aid is not None and aid != DB.ElementId.InvalidElementId
 
 
-def _asm_name(value):
-    """Wall assembly name from a container value (strip leading '*')."""
+def _clean(value):
+    """Panel number from a raw container value (strip leading '*')."""
     if value is None:
         return ""
-    return value.lstrip("*")
+    return value.lstrip("*").strip()
+
+
+def _get_container(elem):
+    p = elem.LookupParameter(pu.PARAM_NAME)
+    if p and p.HasValue:
+        return p.AsString() or ""
+    return ""
+
+
+def _set_container(elem, value):
+    p = elem.LookupParameter(pu.PARAM_NAME)
+    if p and not p.IsReadOnly:
+        try:
+            if p.AsString() != value:
+                p.Set(value)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _assembly_panel_number(asm):
+    """Panel number for an assembly: its own BIMSF_Container, else a member's."""
+    pno = _clean(_get_container(asm))
+    if pno:
+        return pno
+    for mid in asm.GetMemberIds():
+        m = doc.GetElement(mid)
+        if m is None or not _is_structural_framing(m):
+            continue
+        pno = _clean(_get_container(m))
+        if pno:
+            return pno
+    return ""
 
 
 def collect_wall_panels():
-    """{container: [members]} for framing with a direct container, not yet
+    """{panel_number: [members]} for framing with a direct container, not yet
     inside any assembly."""
     wall_panels = {}
     framing = (
@@ -63,16 +99,27 @@ def collect_wall_panels():
     for el in framing:
         if _in_assembly(el):
             continue
-        p = el.LookupParameter(pu.PARAM_NAME)
-        if p and p.HasValue and p.AsString():
-            wall_panels.setdefault(p.AsString(), []).append(el)
+        pno = _clean(_get_container(el))
+        if pno:
+            wall_panels.setdefault(pno, []).append(el)
     return wall_panels
+
+
+def _rename_assembly(asm, panel_no):
+    """Set the assembly type name to the panel number (Revit dedups clashes)."""
+    try:
+        if asm.AssemblyTypeName != panel_no:
+            asm.AssemblyTypeName = panel_no
+        return True
+    except Exception as ex:
+        logger.debug("Rename clash for %s: %s", panel_no, ex)
+        return False
 
 
 def main():
     wall_panels = collect_wall_panels()
 
-    # Snapshot existing assemblies BEFORE we create new ones (these are trusses).
+    # Existing assemblies (trusses etc.) BEFORE we create new wall ones.
     existing_assemblies = list(
         DB.FilteredElementCollector(doc)
         .OfClass(DB.AssemblyInstance)
@@ -88,94 +135,45 @@ def main():
         )
         return
 
+    asm_renamed = 0
+    asm_no_number = 0
     asm_created = 0
-    truss_updated = 0
-    truss_members_set = 0
-    groups_dissolved = 0
-    name_results = []   # (target_name, actual_name)
-    errors = []
 
     with revit.Transaction("UNIQUBE: Create Assemblies"):
-        # --- 0. Ungroup wall members: Revit cannot put grouped elements into
-        #        an assembly, so dissolve any group holding a wall member. ---
-        group_ids = set()
-        for members in wall_panels.values():
-            for el in members:
-                try:
-                    gid = el.GroupId
-                except Exception:
-                    gid = None
-                if gid and gid != DB.ElementId.InvalidElementId:
-                    group_ids.add(gid.IntegerValue)
-        for gid_int in group_ids:
-            g = doc.GetElement(DB.ElementId(gid_int))
-            if g is None:
-                continue
-            try:
-                g.UngroupMembers()
-                groups_dissolved += 1
-            except Exception as ex:
-                errors.append("Ungroup: {}".format(ex))
-        if group_ids:
-            doc.Regenerate()
-
-        # --- 1. Trusses: write assembly name into members' BIMSF_Container ---
+        # --- 1. Existing assemblies: name + container = panel number ---
         for asm in existing_assemblies:
-            try:
-                name = asm.AssemblyTypeName
-            except Exception:
-                name = None
-            if not name:
+            panel_no = _assembly_panel_number(asm)
+            if not panel_no:
+                asm_no_number += 1
                 continue
-            member_changed = False
+            _set_container(asm, panel_no)
             for mid in asm.GetMemberIds():
-                member = doc.GetElement(mid)
-                if member is None or not _is_structural_framing(member):
-                    continue
-                p = member.LookupParameter(pu.PARAM_NAME)
-                if p and not p.IsReadOnly:
-                    try:
-                        if p.AsString() != name:
-                            p.Set(name)
-                            truss_members_set += 1
-                            member_changed = True
-                    except Exception:
-                        pass
-            if member_changed:
-                truss_updated += 1
+                m = doc.GetElement(mid)
+                if m is not None and _is_structural_framing(m):
+                    _set_container(m, panel_no)
+            if _rename_assembly(asm, panel_no):
+                asm_renamed += 1
 
-        # --- 2. Wall panels: unify panel number = BIMSF_Container = assembly ---
-        for container in sorted(wall_panels.keys()):
-            members = wall_panels[container]
+        # --- 2. Wall panels: create assembly named = panel number ---
+        for panel_no in sorted(wall_panels.keys()):
+            members = wall_panels[panel_no]
             if len(members) < 2:
-                continue  # an assembly needs more than one element
+                continue
 
-            # Panel number drives all three names (asterisk stripped).
-            target_name = _asm_name(container)
-
-            # Write the clean panel number back into BIMSF_Container so the
-            # container value matches the panel number and assembly name.
             for el in members:
-                p = el.LookupParameter(pu.PARAM_NAME)
-                if p and not p.IsReadOnly:
-                    try:
-                        if p.AsString() != target_name:
-                            p.Set(target_name)
-                    except Exception:
-                        pass
+                _set_container(el, panel_no)
 
-            # Remove any existing assembly with the same target name (re-run).
+            # Remove any existing assembly with the same name (re-run safe).
             for a in list(
                 DB.FilteredElementCollector(doc)
                 .OfClass(DB.AssemblyInstance)
                 .ToElements()
             ):
                 try:
-                    if a.AssemblyTypeName == target_name:
+                    if a.AssemblyTypeName == panel_no:
                         doc.Delete(a.Id)
                 except Exception:
                     pass
-            doc.Regenerate()
 
             ids = List[DB.ElementId]()
             for el in members:
@@ -187,55 +185,24 @@ def main():
                 )
                 new_asm = DB.AssemblyInstance.Create(doc, ids, naming_cat)
                 doc.Regenerate()
+                _rename_assembly(new_asm, panel_no)
+                _set_container(new_asm, panel_no)
                 asm_created += 1
-
-                # Rename to the panel number. Retry once after a regenerate;
-                # capture the real error so we can see why it would fail.
-                set_ok = _try_set_name(new_asm, target_name, errors)
-                if not set_ok:
-                    doc.Regenerate()
-                    set_ok = _try_set_name(new_asm, target_name, errors)
-
-                try:
-                    actual = new_asm.AssemblyTypeName
-                except Exception:
-                    actual = "?"
-                name_results.append((target_name, actual))
             except Exception as ex:
-                errors.append("Create '{}': {}".format(target_name, ex))
+                logger.debug("Assembly create failed for %s: %s", panel_no, ex)
 
-    # Build report
-    mismatches = [
-        "  {} -> got '{}'".format(t, a)
-        for (t, a) in name_results if a != t
-    ]
     msg = (
         "Done.\n\n"
-        "Wall panel assemblies created: {}\n"
-        "Groups dissolved (to allow assembly): {}\n"
-        "Truss assemblies updated: {}\n"
-        "Truss members re-tagged: {}".format(
-            asm_created, groups_dissolved, truss_updated, truss_members_set
-        )
+        "Existing assemblies renamed to panel number: {}\n"
+        "Wall panel assemblies created: {}".format(asm_renamed, asm_created)
     )
-    if mismatches:
-        msg += "\n\nNames that did NOT match the panel number:\n" + "\n".join(
-            mismatches[:10]
+    if asm_no_number:
+        msg += (
+            "\n\nAssemblies skipped (no BIMSF_Container / panel number): {}\n"
+            "Those have no panel number to use. Assign BIMSF_Container "
+            "first.".format(asm_no_number)
         )
-    if errors:
-        msg += "\n\nErrors:\n" + "\n".join(errors[:5])
-
     forms.alert(msg, title="UNIQUBE — Create Assemblies")
-
-
-def _try_set_name(asm, target_name, errors):
-    """Set AssemblyTypeName, recording any exception. Returns True on success."""
-    try:
-        asm.AssemblyTypeName = target_name
-        return True
-    except Exception as ex:
-        errors.append("Rename to '{}': {}".format(target_name, ex))
-        return False
 
 
 main()
