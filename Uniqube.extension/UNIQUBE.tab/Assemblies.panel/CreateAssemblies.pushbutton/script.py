@@ -18,10 +18,25 @@ How it works (one run):
 """
 from pyrevit import revit, DB, forms, script
 from System.Collections.Generic import List
+from Autodesk.Revit.DB import IFailuresPreprocessor, FailureProcessingResult
 import panel_utils as pu
 
 doc = revit.doc
 logger = script.get_logger()
+
+
+class _SwallowWarnings(IFailuresPreprocessor):
+    """Auto-clear warnings (e.g. 'assembly views will be deleted') so the
+    disassemble/rebuild transaction is not blocked."""
+
+    def PreprocessFailures(self, accessor):
+        try:
+            for f in accessor.GetFailureMessages():
+                if f.GetSeverity() == DB.FailureSeverity.Warning:
+                    accessor.DeleteWarning(f)
+        except Exception:
+            pass
+        return FailureProcessingResult.Continue
 
 
 def _is_structural_framing(elem):
@@ -144,14 +159,27 @@ def main():
 
     created = 0
     skipped_single = 0
+    dissolved = 0
+    dissolve_failed = 0
+    rename_failed = 0
+    errors = []
 
-    with revit.Transaction("UNIQUBE: Create Assemblies"):
+    t = DB.Transaction(doc, "UNIQUBE: Create Assemblies")
+    t.Start()
+    opts = t.GetFailureHandlingOptions()
+    opts.SetFailuresPreprocessor(_SwallowWarnings())
+    opts.SetClearAfterRollback(True)
+    t.SetFailureHandlingOptions(opts)
+    try:
         # Dissolve existing panel assemblies (members are kept in place).
         for asm in dissolve_list:
             try:
                 asm.Disassemble()
+                dissolved += 1
             except Exception as ex:
-                logger.debug("Disassemble failed: %s", ex)
+                dissolve_failed += 1
+                if len(errors) < 3:
+                    errors.append("Disassemble: {}".format(ex))
         doc.Regenerate()
 
         naming_cat = DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
@@ -165,12 +193,20 @@ def main():
                 if el is not None:
                     _set_container(el, pno)
 
-            if len(ids) < 2:
+            # Only assemble members that are currently free (not stuck in an
+            # assembly that failed to dissolve).
+            free_ids = []
+            for eid in ids:
+                el = doc.GetElement(eid)
+                if el is not None and not _in_assembly(el):
+                    free_ids.append(eid)
+
+            if len(free_ids) < 2:
                 skipped_single += 1
                 continue
 
             id_list = List[DB.ElementId]()
-            for eid in ids:
+            for eid in free_ids:
                 id_list.Add(eid)
 
             try:
@@ -179,21 +215,38 @@ def main():
                 try:
                     new_asm.AssemblyTypeName = pno
                 except Exception as ex:
-                    logger.debug("Rename failed for %s: %s", pno, ex)
+                    rename_failed += 1
+                    if len(errors) < 3:
+                        errors.append("Rename {}: {}".format(pno, ex))
                 _set_container(new_asm, pno)
                 created += 1
             except Exception as ex:
-                logger.debug("Create failed for %s: %s", pno, ex)
+                if len(errors) < 3:
+                    errors.append("Create {}: {}".format(pno, ex))
+        t.Commit()
+    except Exception as ex:
+        t.RollBack()
+        forms.alert("Failed: {}".format(ex), title="UNIQUBE")
+        return
 
     msg = (
         "Done.\n\n"
+        "Existing assemblies dissolved: {}\n"
         "Assemblies rebuilt (1 per panel number): {}\n"
-        "Panel number = BIMSF_Container = assembly name.".format(created)
+        "Panel number = BIMSF_Container = assembly name.".format(
+            dissolved, created
+        )
     )
+    if dissolve_failed:
+        msg += "\nDissolve failures: {}".format(dissolve_failed)
+    if rename_failed:
+        msg += "\nRename failures: {}".format(rename_failed)
     if skipped_single:
-        msg += "\n\nPanels with only one element (no assembly): {}".format(
+        msg += "\nPanels with <2 free elements (no assembly): {}".format(
             skipped_single
         )
+    if errors:
+        msg += "\n\nFirst errors:\n" + "\n".join(errors)
     forms.alert(msg, title="UNIQUBE — Create Assemblies")
 
 
