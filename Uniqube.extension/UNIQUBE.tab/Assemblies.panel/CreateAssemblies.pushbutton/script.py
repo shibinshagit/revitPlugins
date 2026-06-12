@@ -163,15 +163,20 @@ def main():
     dissolve_failed = 0
     rename_failed = 0
     errors = []
+    new_assemblies = []  # (AssemblyInstance, panel_number)
 
-    t = DB.Transaction(doc, "UNIQUBE: Create Assemblies")
-    t.Start()
-    opts = t.GetFailureHandlingOptions()
+    naming_cat = DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
+
+    # --- Transaction 1: dissolve old assemblies and create new ones ---
+    # The assembly type is only realized after this transaction is committed,
+    # so renaming has to wait for transaction 2.
+    t1 = DB.Transaction(doc, "UNIQUBE: Rebuild Assemblies")
+    t1.Start()
+    opts = t1.GetFailureHandlingOptions()
     opts.SetFailuresPreprocessor(_SwallowWarnings())
     opts.SetClearAfterRollback(True)
-    t.SetFailureHandlingOptions(opts)
+    t1.SetFailureHandlingOptions(opts)
     try:
-        # Dissolve existing panel assemblies (members are kept in place).
         for asm in dissolve_list:
             try:
                 asm.Disassemble()
@@ -182,19 +187,13 @@ def main():
                     errors.append("Disassemble: {}".format(ex))
         doc.Regenerate()
 
-        naming_cat = DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
-
         for pno in sorted(groups.keys()):
             ids = groups[pno]
-
-            # Set the panel number on every member.
             for eid in ids:
                 el = doc.GetElement(eid)
                 if el is not None:
                     _set_container(el, pno)
 
-            # Only assemble members that are currently free (not stuck in an
-            # assembly that failed to dissolve).
             free_ids = []
             for eid in ids:
                 el = doc.GetElement(eid)
@@ -211,22 +210,37 @@ def main():
 
             try:
                 new_asm = DB.AssemblyInstance.Create(doc, id_list, naming_cat)
-                doc.Regenerate()
-                try:
-                    new_asm.AssemblyTypeName = pno
-                except Exception as ex:
-                    rename_failed += 1
-                    if len(errors) < 3:
-                        errors.append("Rename {}: {}".format(pno, ex))
-                _set_container(new_asm, pno)
+                new_assemblies.append((new_asm, pno))
                 created += 1
             except Exception as ex:
                 if len(errors) < 3:
                     errors.append("Create {}: {}".format(pno, ex))
-        t.Commit()
+        t1.Commit()
     except Exception as ex:
-        t.RollBack()
-        forms.alert("Failed: {}".format(ex), title="UNIQUBE")
+        t1.RollBack()
+        forms.alert("Failed (create step): {}".format(ex), title="UNIQUBE")
+        return
+
+    # --- Transaction 2: rename assemblies and set their container ---
+    t2 = DB.Transaction(doc, "UNIQUBE: Name Assemblies")
+    t2.Start()
+    opts2 = t2.GetFailureHandlingOptions()
+    opts2.SetFailuresPreprocessor(_SwallowWarnings())
+    opts2.SetClearAfterRollback(True)
+    t2.SetFailureHandlingOptions(opts2)
+    try:
+        for new_asm, pno in new_assemblies:
+            try:
+                new_asm.AssemblyTypeName = pno
+            except Exception as ex:
+                rename_failed += 1
+                if len(errors) < 3:
+                    errors.append("Rename {}: {}".format(pno, ex))
+            _set_container(new_asm, pno)
+        t2.Commit()
+    except Exception as ex:
+        t2.RollBack()
+        forms.alert("Failed (name step): {}".format(ex), title="UNIQUBE")
         return
 
     msg = (
