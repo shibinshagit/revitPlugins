@@ -89,12 +89,14 @@ def main():
     asm_created = 0
     truss_updated = 0
     truss_members_set = 0
+    name_results = []   # (target_name, actual_name)
+    errors = []
 
     with revit.Transaction("UNIQUBE: Create Assemblies"):
         # --- 1. Trusses: write assembly name into members' BIMSF_Container ---
         for asm in existing_assemblies:
             try:
-                name = asm.Name
+                name = asm.AssemblyTypeName
             except Exception:
                 name = None
             if not name:
@@ -147,6 +149,7 @@ def main():
                         doc.Delete(a.Id)
                 except Exception:
                     pass
+            doc.Regenerate()
 
             ids = List[DB.ElementId]()
             for el in members:
@@ -158,23 +161,54 @@ def main():
                 )
                 new_asm = DB.AssemblyInstance.Create(doc, ids, naming_cat)
                 doc.Regenerate()
-                try:
-                    new_asm.AssemblyTypeName = target_name
-                except Exception:
-                    logger.debug("Name clash for %s; keeping default", target_name)
                 asm_created += 1
-            except Exception as ex:
-                logger.debug("Assembly create failed for %s: %s", container, ex)
 
-    forms.alert(
+                # Rename to the panel number. Retry once after a regenerate;
+                # capture the real error so we can see why it would fail.
+                set_ok = _try_set_name(new_asm, target_name, errors)
+                if not set_ok:
+                    doc.Regenerate()
+                    set_ok = _try_set_name(new_asm, target_name, errors)
+
+                try:
+                    actual = new_asm.AssemblyTypeName
+                except Exception:
+                    actual = "?"
+                name_results.append((target_name, actual))
+            except Exception as ex:
+                errors.append("Create '{}': {}".format(target_name, ex))
+
+    # Build report
+    mismatches = [
+        "  {} -> got '{}'".format(t, a)
+        for (t, a) in name_results if a != t
+    ]
+    msg = (
         "Done.\n\n"
         "Wall panel assemblies created: {}\n"
         "Truss assemblies updated: {}\n"
-        "Truss members re-tagged (BIMSF_Container = assembly name): {}".format(
+        "Truss members re-tagged: {}".format(
             asm_created, truss_updated, truss_members_set
-        ),
-        title="UNIQUBE — Create Assemblies",
+        )
     )
+    if mismatches:
+        msg += "\n\nNames that did NOT match the panel number:\n" + "\n".join(
+            mismatches[:10]
+        )
+    if errors:
+        msg += "\n\nErrors:\n" + "\n".join(errors[:5])
+
+    forms.alert(msg, title="UNIQUBE — Create Assemblies")
+
+
+def _try_set_name(asm, target_name, errors):
+    """Set AssemblyTypeName, recording any exception. Returns True on success."""
+    try:
+        asm.AssemblyTypeName = target_name
+        return True
+    except Exception as ex:
+        errors.append("Rename to '{}': {}".format(target_name, ex))
+        return False
 
 
 main()
