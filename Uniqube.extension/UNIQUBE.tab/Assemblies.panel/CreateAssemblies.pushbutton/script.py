@@ -1,20 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Rebuild assemblies so panel number = BIMSF_Container = assembly name.
+"""Make BIMSF_Container match the assembly name for every panel/truss.
 
-The panel number is the real identifier stored in BIMSF_Container (e.g.
-ELB-2001 for walls, FT-FloorPanel2001 for floors). This tool guarantees a
-clean 1:1 result: exactly one assembly per panel number, named exactly that,
-with BIMSF_Container set to match on both the members and the assembly.
+Naming rules (values kept exactly as-is, asterisk preserved):
+- Trusses: each existing assembly stays one unit. Its assembly name (e.g.
+  CT003-3, TB-4) is written into BIMSF_Container on the assembly and its
+  members. Trusses are never merged or dissolved.
+- Wall panels: framing carrying BIMSF_Container directly (e.g. *ELB-1001) but
+  not yet in an assembly is grouped into one assembly per panel, named exactly
+  the container value (asterisk kept), with BIMSF_Container set on the
+  assembly element too.
 
-How it works (one run):
-1. Determine each framing element's panel number. For elements inside an
-   existing assembly the number is read from the assembly's BIMSF_Container
-   (reliable); for loose framing it is read from the element's own container.
-2. Dissolve all existing panel assemblies (members are kept) so the stale or
-   mismatched names from earlier runs are cleared.
-3. Group all framing by panel number and create ONE assembly per number,
-   named exactly the panel number, writing the number into BIMSF_Container on
-   the members and the assembly element.
+Run with the model in its original MWF state (reopen/discard if you previously
+experimented), so trusses are their individual assemblies.
 """
 from pyrevit import revit, DB, forms, script
 from System.Collections.Generic import List
@@ -26,9 +23,6 @@ logger = script.get_logger()
 
 
 class _SwallowWarnings(IFailuresPreprocessor):
-    """Auto-clear warnings (e.g. 'assembly views will be deleted') so the
-    disassemble/rebuild transaction is not blocked."""
-
     def PreprocessFailures(self, accessor):
         try:
             for f in accessor.GetFailureMessages():
@@ -62,12 +56,6 @@ def _in_assembly(elem):
     return aid is not None and aid != DB.ElementId.InvalidElementId
 
 
-def _clean(value):
-    if value is None:
-        return ""
-    return value.lstrip("*").strip()
-
-
 def _get_container(elem):
     p = elem.LookupParameter(pu.PARAM_NAME)
     if p and p.HasValue:
@@ -87,47 +75,10 @@ def _set_container(elem, value):
     return False
 
 
-def build_groups():
-    """Return (groups, dissolve_list).
-
-    groups: {panel_number: [ElementId of framing]}
-    dissolve_list: [AssemblyInstance] to disassemble before rebuilding
-    """
-    groups = {}
-    seen = set()
-    dissolve_list = []
-
-    assemblies = list(
-        DB.FilteredElementCollector(doc)
-        .OfClass(DB.AssemblyInstance)
-        .ToElements()
-    )
-
-    for asm in assemblies:
-        member_framing = []
-        for mid in asm.GetMemberIds():
-            m = doc.GetElement(mid)
-            if m is not None and _is_structural_framing(m):
-                member_framing.append(m.Id)
-        if not member_framing:
-            continue
-
-        # Panel number: prefer the assembly's container, else a member's.
-        pno = _clean(_get_container(asm))
-        if not pno:
-            for fid in member_framing:
-                pno = _clean(_get_container(doc.GetElement(fid)))
-                if pno:
-                    break
-        if not pno:
-            continue
-
-        for fid in member_framing:
-            groups.setdefault(pno, []).append(fid)
-            seen.add(fid.IntegerValue)
-        dissolve_list.append(asm)
-
-    # Loose framing (not in any assembly) keyed by its own container.
+def collect_wall_panels():
+    """{container: [members]} for framing carrying a container directly and not
+    inside any assembly. Container value is used verbatim (asterisk kept)."""
+    wall_panels = {}
     framing = (
         DB.FilteredElementCollector(doc)
         .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
@@ -135,128 +86,117 @@ def build_groups():
         .ToElements()
     )
     for el in framing:
-        if el.Id.IntegerValue in seen:
-            continue
         if _in_assembly(el):
             continue
-        pno = _clean(_get_container(el))
-        if pno:
-            groups.setdefault(pno, []).append(el.Id)
-            seen.add(el.Id.IntegerValue)
-
-    return groups, dissolve_list
+        c = _get_container(el)
+        if c:
+            wall_panels.setdefault(c, []).append(el)
+    return wall_panels
 
 
 def main():
-    groups, dissolve_list = build_groups()
+    existing_assemblies = list(
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    )
+    wall_panels = collect_wall_panels()
 
-    if not groups:
+    if not existing_assemblies and not wall_panels:
         forms.alert(
-            "No framing with a '{}' panel number found.".format(pu.PARAM_NAME),
+            "No assemblies and no wall panels with '{}' found.".format(
+                pu.PARAM_NAME
+            ),
             title="UNIQUBE",
         )
         return
 
+    truss_updated = 0
     created = 0
     skipped_single = 0
-    dissolved = 0
-    dissolve_failed = 0
     rename_failed = 0
     errors = []
-    new_assemblies = []  # (AssemblyInstance, panel_number)
+    new_assemblies = []  # (AssemblyInstance, name)
 
     naming_cat = DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
 
-    # --- Transaction 1: dissolve old assemblies and create new ones ---
-    # The assembly type is only realized after this transaction is committed,
-    # so renaming has to wait for transaction 2.
-    t1 = DB.Transaction(doc, "UNIQUBE: Rebuild Assemblies")
+    # --- Transaction 1: truss containers + create wall assemblies ---
+    t1 = DB.Transaction(doc, "UNIQUBE: Create Assemblies")
     t1.Start()
-    opts = t1.GetFailureHandlingOptions()
-    opts.SetFailuresPreprocessor(_SwallowWarnings())
-    opts.SetClearAfterRollback(True)
-    t1.SetFailureHandlingOptions(opts)
+    o1 = t1.GetFailureHandlingOptions()
+    o1.SetFailuresPreprocessor(_SwallowWarnings())
+    o1.SetClearAfterRollback(True)
+    t1.SetFailureHandlingOptions(o1)
     try:
-        for asm in dissolve_list:
+        # Trusses: BIMSF_Container = assembly name (on assembly + members).
+        for asm in existing_assemblies:
             try:
-                asm.Disassemble()
-                dissolved += 1
-            except Exception as ex:
-                dissolve_failed += 1
-                if len(errors) < 3:
-                    errors.append("Disassemble: {}".format(ex))
-        doc.Regenerate()
+                name = asm.Name
+            except Exception:
+                name = None
+            if not name:
+                continue
+            _set_container(asm, name)
+            for mid in asm.GetMemberIds():
+                m = doc.GetElement(mid)
+                if m is not None and _is_structural_framing(m):
+                    _set_container(m, name)
+            truss_updated += 1
 
-        for pno in sorted(groups.keys()):
-            ids = groups[pno]
-            for eid in ids:
-                el = doc.GetElement(eid)
-                if el is not None:
-                    _set_container(el, pno)
-
-            free_ids = []
-            for eid in ids:
-                el = doc.GetElement(eid)
-                if el is not None and not _in_assembly(el):
-                    free_ids.append(eid)
-
-            if len(free_ids) < 2:
+        # Wall panels: one assembly per container (name kept verbatim).
+        for container in sorted(wall_panels.keys()):
+            members = wall_panels[container]
+            if len(members) < 2:
                 skipped_single += 1
                 continue
-
             id_list = List[DB.ElementId]()
-            for eid in free_ids:
-                id_list.Add(eid)
-
+            for el in members:
+                id_list.Add(el.Id)
             try:
                 new_asm = DB.AssemblyInstance.Create(doc, id_list, naming_cat)
-                new_assemblies.append((new_asm, pno))
+                new_assemblies.append((new_asm, container))
                 created += 1
             except Exception as ex:
                 if len(errors) < 3:
-                    errors.append("Create {}: {}".format(pno, ex))
+                    errors.append("Create {}: {}".format(container, ex))
         t1.Commit()
     except Exception as ex:
         t1.RollBack()
         forms.alert("Failed (create step): {}".format(ex), title="UNIQUBE")
         return
 
-    # --- Transaction 2: rename assemblies and set their container ---
-    t2 = DB.Transaction(doc, "UNIQUBE: Name Assemblies")
-    t2.Start()
-    opts2 = t2.GetFailureHandlingOptions()
-    opts2.SetFailuresPreprocessor(_SwallowWarnings())
-    opts2.SetClearAfterRollback(True)
-    t2.SetFailureHandlingOptions(opts2)
-    try:
-        for new_asm, pno in new_assemblies:
-            try:
-                new_asm.AssemblyTypeName = pno
-            except Exception as ex:
-                rename_failed += 1
-                if len(errors) < 3:
-                    errors.append("Rename {}: {}".format(pno, ex))
-            _set_container(new_asm, pno)
-        t2.Commit()
-    except Exception as ex:
-        t2.RollBack()
-        forms.alert("Failed (name step): {}".format(ex), title="UNIQUBE")
-        return
+    # --- Transaction 2: name wall assemblies + set their container ---
+    if new_assemblies:
+        t2 = DB.Transaction(doc, "UNIQUBE: Name Assemblies")
+        t2.Start()
+        o2 = t2.GetFailureHandlingOptions()
+        o2.SetFailuresPreprocessor(_SwallowWarnings())
+        o2.SetClearAfterRollback(True)
+        t2.SetFailureHandlingOptions(o2)
+        try:
+            for new_asm, name in new_assemblies:
+                try:
+                    new_asm.AssemblyTypeName = name
+                except Exception as ex:
+                    rename_failed += 1
+                    if len(errors) < 3:
+                        errors.append("Rename {}: {}".format(name, ex))
+                _set_container(new_asm, name)
+            t2.Commit()
+        except Exception as ex:
+            t2.RollBack()
+            forms.alert("Failed (name step): {}".format(ex), title="UNIQUBE")
+            return
 
     msg = (
         "Done.\n\n"
-        "Existing assemblies dissolved: {}\n"
-        "Assemblies rebuilt (1 per panel number): {}\n"
-        "Panel number = BIMSF_Container = assembly name.".format(
-            dissolved, created
-        )
+        "Trusses updated (BIMSF_Container = assembly name): {}\n"
+        "Wall panel assemblies created: {}".format(truss_updated, created)
     )
-    if dissolve_failed:
-        msg += "\nDissolve failures: {}".format(dissolve_failed)
     if rename_failed:
-        msg += "\nRename failures: {}".format(rename_failed)
+        msg += "\nWall rename failures: {}".format(rename_failed)
     if skipped_single:
-        msg += "\nPanels with <2 free elements (no assembly): {}".format(
+        msg += "\nWall panels with <2 elements (no assembly): {}".format(
             skipped_single
         )
     if errors:
