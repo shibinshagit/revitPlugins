@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Create assemblies for panels, and align truss containers to assembly names.
+"""Create assemblies for panels and keep panel number = container = assembly.
 
 Two actions in one run:
 1. Wall panels: structural framing carrying BIMSF_Container directly (and not
-   already inside an assembly) are grouped into a fresh assembly per panel,
-   named after the panel.
-2. Trusses: members already live inside an assembly (e.g. TB-4, CT003-3). For
-   those, the assembly name is written into each member's BIMSF_Container,
-   replacing the floor-panel container (e.g. *FT-FloorPanel2001 -> TB-4).
+   already inside an assembly) are grouped into a fresh assembly per panel.
+   The panel number, BIMSF_Container, and assembly name are all set to the
+   same value (asterisk stripped, e.g. *ELB-2001 -> ELB-2001).
+2. Trusses: members already live inside an assembly (e.g. TB-4, CT003-3). The
+   assembly name is written into each member's BIMSF_Container, so the
+   container matches the assembly name (e.g. *FT-FloorPanel2001 -> TB-4).
 """
 from pyrevit import revit, DB, forms, script
 from System.Collections.Generic import List
@@ -115,13 +116,25 @@ def main():
             if member_changed:
                 truss_updated += 1
 
-        # --- 2. Wall panels: create a fresh assembly per container ---
+        # --- 2. Wall panels: unify panel number = BIMSF_Container = assembly ---
         for container in sorted(wall_panels.keys()):
             members = wall_panels[container]
             if len(members) < 2:
                 continue  # an assembly needs more than one element
 
+            # Panel number drives all three names (asterisk stripped).
             target_name = _asm_name(container)
+
+            # Write the clean panel number back into BIMSF_Container so the
+            # container value matches the panel number and assembly name.
+            for el in members:
+                p = el.LookupParameter(pu.PARAM_NAME)
+                if p and not p.IsReadOnly:
+                    try:
+                        if p.AsString() != target_name:
+                            p.Set(target_name)
+                    except Exception:
+                        pass
 
             # Remove any existing assembly with the same target name (re-run).
             for a in list(
