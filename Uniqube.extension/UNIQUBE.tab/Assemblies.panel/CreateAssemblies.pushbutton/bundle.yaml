@@ -1,0 +1,5 @@
+title: Create Assemblies
+tooltip: >-
+  Create fresh assemblies for wall panels (by BIMSF_Container) and, for
+  existing truss assemblies, write the assembly name into BIMSF_Container.
+author: Uniqube
