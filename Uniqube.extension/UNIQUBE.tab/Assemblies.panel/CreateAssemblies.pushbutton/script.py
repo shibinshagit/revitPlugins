@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """Create assemblies for panels and keep panel number = container = assembly.
 
-Two actions in one run:
-1. Wall panels: structural framing carrying BIMSF_Container directly (and not
+Actions in one run:
+1. Wall panels are auto-ungrouped first, because Revit cannot place grouped
+   elements into an assembly.
+2. Wall panels: structural framing carrying BIMSF_Container directly (and not
    already inside an assembly) are grouped into a fresh assembly per panel.
    The panel number, BIMSF_Container, and assembly name are all set to the
    same value (asterisk stripped, e.g. *ELB-2001 -> ELB-2001).
-2. Trusses: members already live inside an assembly (e.g. TB-4, CT003-3). The
+3. Trusses: members already live inside an assembly (e.g. TB-4, CT003-3). The
    assembly name is written into each member's BIMSF_Container, so the
    container matches the assembly name (e.g. *FT-FloorPanel2001 -> TB-4).
 """
@@ -89,10 +91,34 @@ def main():
     asm_created = 0
     truss_updated = 0
     truss_members_set = 0
+    groups_dissolved = 0
     name_results = []   # (target_name, actual_name)
     errors = []
 
     with revit.Transaction("UNIQUBE: Create Assemblies"):
+        # --- 0. Ungroup wall members: Revit cannot put grouped elements into
+        #        an assembly, so dissolve any group holding a wall member. ---
+        group_ids = set()
+        for members in wall_panels.values():
+            for el in members:
+                try:
+                    gid = el.GroupId
+                except Exception:
+                    gid = None
+                if gid and gid != DB.ElementId.InvalidElementId:
+                    group_ids.add(gid.IntegerValue)
+        for gid_int in group_ids:
+            g = doc.GetElement(DB.ElementId(gid_int))
+            if g is None:
+                continue
+            try:
+                g.UngroupMembers()
+                groups_dissolved += 1
+            except Exception as ex:
+                errors.append("Ungroup: {}".format(ex))
+        if group_ids:
+            doc.Regenerate()
+
         # --- 1. Trusses: write assembly name into members' BIMSF_Container ---
         for asm in existing_assemblies:
             try:
@@ -186,9 +212,10 @@ def main():
     msg = (
         "Done.\n\n"
         "Wall panel assemblies created: {}\n"
+        "Groups dissolved (to allow assembly): {}\n"
         "Truss assemblies updated: {}\n"
         "Truss members re-tagged: {}".format(
-            asm_created, truss_updated, truss_members_set
+            asm_created, groups_dissolved, truss_updated, truss_members_set
         )
     )
     if mismatches:
