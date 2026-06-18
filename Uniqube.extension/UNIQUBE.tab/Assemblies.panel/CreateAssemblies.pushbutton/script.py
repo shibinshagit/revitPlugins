@@ -116,7 +116,6 @@ def main():
     skipped_single = 0
     rename_failed = 0
     errors = []
-    diag = []
     new_assemblies = []  # (AssemblyInstance, name)
 
     naming_cat = DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
@@ -181,43 +180,27 @@ def main():
         t2.SetFailureHandlingOptions(o2)
         try:
             for new_asm, name in new_assemblies:
-                assigned = False
-                # Give each assembly its OWN type by duplicating the current
-                # assembly type with the target name and reassigning it. This
-                # is the only way two geometrically identical assemblies can
-                # carry different names (Revit shares one type otherwise).
+                # Name the assembly type from the panel number. For
+                # geometrically identical panels Revit shares ONE type, so the
+                # type name cannot differ between them - that's a Revit limit.
                 try:
-                    at = doc.GetElement(new_asm.GetTypeId())
-                    if at is not None:
-                        new_type = at.Duplicate(name)
-                        new_asm.ChangeTypeId(new_type.Id)
-                        doc.Regenerate()
-                        assigned = True
+                    new_asm.AssemblyTypeName = name
+                    doc.Regenerate()
                 except Exception as ex:
+                    rename_failed += 1
                     if len(errors) < 3:
-                        errors.append("Duplicate {}: {}".format(name, ex))
+                        errors.append("Rename {}: {}".format(name, ex))
 
-                if not assigned:
-                    # Fallback: rename the (possibly shared) type directly.
-                    try:
-                        new_asm.AssemblyTypeName = name
-                        doc.Regenerate()
-                    except Exception as ex:
-                        rename_failed += 1
-                        if len(errors) < 3:
-                            errors.append("Rename {}: {}".format(name, ex))
-
+                # Container + Mark on the assembly instance ARE per-instance,
+                # so they always hold the correct panel number even when the
+                # type name is shared.
                 _set_container(new_asm, name)
-                # Diagnostic: requested name, actual name, and type id.
-                try:
-                    actual = new_asm.AssemblyTypeName
-                except Exception:
-                    actual = "?"
-                try:
-                    tid = new_asm.GetTypeId().IntegerValue
-                except Exception:
-                    tid = "?"
-                diag.append("{} -> '{}' (typeId {})".format(name, actual, tid))
+                mk = new_asm.LookupParameter("Mark")
+                if mk and not mk.IsReadOnly:
+                    try:
+                        mk.Set(name)
+                    except Exception:
+                        pass
             t2.Commit()
         except Exception as ex:
             t2.RollBack()
@@ -237,8 +220,6 @@ def main():
         )
     if errors:
         msg += "\n\nFirst errors:\n" + "\n".join(errors)
-    if diag:
-        msg += "\n\nDiagnostic (name -> actual (typeId)):\n" + "\n".join(diag[:10])
     forms.alert(msg, title="UNIQUBE — Create Assemblies")
 
 
