@@ -154,6 +154,11 @@ def main():
                 id_list.Add(el.Id)
             try:
                 new_asm = DB.AssemblyInstance.Create(doc, id_list, naming_cat)
+                # Regenerate after EACH create so Revit finalizes this
+                # assembly's own type before the next one is created.
+                # Without this, multiple assemblies created in one transaction
+                # share an unfinalized type and all end up with the same name.
+                doc.Regenerate()
                 new_assemblies.append((new_asm, container))
                 created += 1
             except Exception as ex:
@@ -177,6 +182,7 @@ def main():
             for new_asm, name in new_assemblies:
                 try:
                     new_asm.AssemblyTypeName = name
+                    doc.Regenerate()
                 except Exception as ex:
                     rename_failed += 1
                     if len(errors) < 3:
