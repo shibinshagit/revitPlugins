@@ -150,20 +150,6 @@ def main():
             if len(members) < 2:
                 skipped_single += 1
                 continue
-            # Write the panel number into each member's Comments so two
-            # geometrically identical panels are no longer "identical" to
-            # Revit's assembly comparison. This is what lets *ELB-1001 and
-            # *ELB-2001 become separate assembly types and keep separate names.
-            for el in members:
-                cp = el.get_Parameter(
-                    DB.BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS
-                )
-                if cp and not cp.IsReadOnly:
-                    try:
-                        cp.Set(container)
-                    except Exception:
-                        pass
-            doc.Regenerate()
             id_list = List[DB.ElementId]()
             for el in members:
                 id_list.Add(el.Id)
