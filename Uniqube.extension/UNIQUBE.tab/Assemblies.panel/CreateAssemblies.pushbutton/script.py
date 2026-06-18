@@ -181,13 +181,32 @@ def main():
         t2.SetFailureHandlingOptions(o2)
         try:
             for new_asm, name in new_assemblies:
+                assigned = False
+                # Give each assembly its OWN type by duplicating the current
+                # assembly type with the target name and reassigning it. This
+                # is the only way two geometrically identical assemblies can
+                # carry different names (Revit shares one type otherwise).
                 try:
-                    new_asm.AssemblyTypeName = name
-                    doc.Regenerate()
+                    at = doc.GetElement(new_asm.GetTypeId())
+                    if at is not None:
+                        new_type = at.Duplicate(name)
+                        new_asm.ChangeTypeId(new_type.Id)
+                        doc.Regenerate()
+                        assigned = True
                 except Exception as ex:
-                    rename_failed += 1
                     if len(errors) < 3:
-                        errors.append("Rename {}: {}".format(name, ex))
+                        errors.append("Duplicate {}: {}".format(name, ex))
+
+                if not assigned:
+                    # Fallback: rename the (possibly shared) type directly.
+                    try:
+                        new_asm.AssemblyTypeName = name
+                        doc.Regenerate()
+                    except Exception as ex:
+                        rename_failed += 1
+                        if len(errors) < 3:
+                            errors.append("Rename {}: {}".format(name, ex))
+
                 _set_container(new_asm, name)
                 # Diagnostic: requested name, actual name, and type id.
                 try:
