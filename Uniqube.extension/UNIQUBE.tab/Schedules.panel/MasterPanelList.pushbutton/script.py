@@ -57,23 +57,60 @@ def _is_structural_framing(elem):
             return False
 
 
-def _display_name(raw):
-    """Strip the leading '*' from a panel name (e.g. *ELB-1001 -> ELB-1001)."""
-    if raw is None:
-        return ""
-    return raw.lstrip("*")
+def _container(elem):
+    p = elem.LookupParameter(CONTAINER_PARAM)
+    if p and p.HasValue:
+        return p.AsString() or ""
+    return ""
+
+
+def _in_assembly(elem):
+    try:
+        aid = elem.AssemblyInstanceId
+    except Exception:
+        return False
+    return aid is not None and aid != DB.ElementId.InvalidElementId
 
 
 def collect_units():
-    """Collect leaf units to list.
+    """Return {panel_number: [ [members of one instance], ... ]}.
 
-    Returns:
-      wall_panels: {container_name: [members]} - framing with a direct
-                   BIMSF_Container (one wall panel each).
-      truss_groups: {assembly_name: [ [members of instance], ... ]} - one
-                    list of member-lists per assembly name (floor trusses).
+    Quantity for a panel number is the number of instances (assemblies) that
+    share it. The panel number is taken verbatim from BIMSF_Container, so the
+    asterisk is preserved (e.g. *ELB-1001). Each assembly is one instance;
+    loose framing sharing a container counts as one instance.
     """
-    wall_panels = {}
+    units = {}
+    assembled = set()
+
+    assemblies = (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    )
+    for asm in assemblies:
+        members = []
+        for mid in asm.GetMemberIds():
+            m = doc.GetElement(mid)
+            if m is not None and _is_structural_framing(m):
+                members.append(m)
+        if not members:
+            continue
+        # Panel number: assembly container, else a member's container.
+        pno = _container(asm)
+        if not pno:
+            for m in members:
+                pno = _container(m)
+                if pno:
+                    break
+        if not pno:
+            continue
+        units.setdefault(pno, []).append(members)
+        for m in members:
+            assembled.add(m.Id.IntegerValue)
+
+    # Loose framing (not in any assembly) — one instance per panel number.
+    loose = {}
     framing = (
         DB.FilteredElementCollector(doc)
         .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
@@ -81,40 +118,15 @@ def collect_units():
         .ToElements()
     )
     for el in framing:
-        p = el.LookupParameter(CONTAINER_PARAM)
-        if p and p.HasValue and p.AsString():
-            wall_panels.setdefault(p.AsString(), []).append(el)
-
-    truss_groups = {}
-    assemblies = (
-        DB.FilteredElementCollector(doc)
-        .OfClass(DB.AssemblyInstance)
-        .ToElements()
-    )
-    for asm in assemblies:
-        cp = asm.LookupParameter(CONTAINER_PARAM)
-        if not (cp and cp.HasValue and cp.AsString()):
+        if el.Id.IntegerValue in assembled or _in_assembly(el):
             continue
-        members = []
-        for mid in asm.GetMemberIds():
-            m = doc.GetElement(mid)
-            if m is None or not _is_structural_framing(m):
-                continue
-            mc = m.LookupParameter(CONTAINER_PARAM)
-            if mc and mc.HasValue and mc.AsString():
-                continue  # belongs to a wall panel, already counted
-            members.append(m)
-        if not members:
-            continue
-        try:
-            name = asm.Name
-        except Exception:
-            name = None
-        if not name:
-            name = cp.AsString()
-        truss_groups.setdefault(name, []).append(members)
+        pno = _container(el)
+        if pno:
+            loose.setdefault(pno, []).append(el)
+    for pno, members in loose.items():
+        units.setdefault(pno, []).append(members)
 
-    return wall_panels, truss_groups
+    return units
 
 
 def _panel_dims(elements):
@@ -269,47 +281,39 @@ def _write(members, name, qty, length, height, thickness, weight):
         _set(el, UQ_WEIGHT, weight)
 
 
-def populate_params(wall_panels, truss_groups):
+def populate_params(units):
     """Write UQ_* values onto every framing member; return summary rows.
 
-    One row per panel name: wall panels (qty 1, panel dims) and floor
-    trusses (qty = instance count, dims of a single truss).
+    One row per panel number. Qty = number of instances (assemblies) that
+    share the panel number. Dimensions and weight are for a single instance.
+    The panel number keeps its asterisk.
     """
     summary = []
-
-    # Wall panels: one row each, qty 1.
-    for container in sorted(wall_panels.keys()):
-        members = wall_panels[container]
-        length, height, thickness = _dims_strings(members)
-        weight = "{0:.1f}".format(_panel_weight_lb(members))
-        name = _display_name(container)
-        _write(members, name, "1", length, height, thickness, weight)
-        summary.append([name, "1", length, height, thickness, weight])
-
-    # Floor trusses: one row per assembly name, qty = number of instances,
-    # dims/weight from a single instance.
-    for raw_name in sorted(truss_groups.keys()):
-        instances = truss_groups[raw_name]
+    for pno in sorted(units.keys()):
+        instances = units[pno]
         qty = len(instances)
         one = instances[0]
         length, height, thickness = _dims_strings(one)
         weight = "{0:.1f}".format(_panel_weight_lb(one))
-        name = _display_name(raw_name)
         for members in instances:
-            _write(members, name, str(qty), length, height, thickness, weight)
-        summary.append([name, str(qty), length, height, thickness, weight])
-
+            _write(members, pno, str(qty), length, height, thickness, weight)
+        summary.append([pno, str(qty), length, height, thickness, weight])
     return summary
 
 
 # --------------- schedule ---------------
 
-def _add_field(defn, sched_fields, name, hidden=False):
+def _add_field(defn, sched_fields, name, heading=None, hidden=False):
     for sf in sched_fields:
         if sf.GetName(doc) == name:
             field = defn.AddField(sf)
             if hidden:
                 field.IsHidden = True
+            if heading:
+                try:
+                    field.ColumnHeading = heading
+                except Exception:
+                    pass
             return field
     return None
 
@@ -358,12 +362,12 @@ def build_schedule():
     defn = sched.Definition
     sched_fields = defn.GetSchedulableFields()
 
-    panel_field = _add_field(defn, sched_fields, UQ_PANEL)
-    _add_field(defn, sched_fields, UQ_QTY)
-    _add_field(defn, sched_fields, UQ_LENGTH)
-    _add_field(defn, sched_fields, UQ_HEIGHT)
-    _add_field(defn, sched_fields, UQ_THICKNESS)
-    _add_field(defn, sched_fields, UQ_WEIGHT)
+    panel_field = _add_field(defn, sched_fields, UQ_PANEL, "Panel")
+    _add_field(defn, sched_fields, UQ_QTY, "Qty")
+    _add_field(defn, sched_fields, UQ_LENGTH, "Length")
+    _add_field(defn, sched_fields, UQ_HEIGHT, "Height")
+    _add_field(defn, sched_fields, UQ_THICKNESS, "Thickness")
+    _add_field(defn, sched_fields, UQ_WEIGHT, "Weight (lb)")
 
     # Only show rows that this tool tagged
     if panel_field:
@@ -431,8 +435,8 @@ class MasterPanelWindow(forms.WPFWindow):
 # --------------- main ---------------
 
 def main():
-    wall_panels, truss_groups = collect_units()
-    if not wall_panels and not truss_groups:
+    units = collect_units()
+    if not units:
         forms.alert(
             "No panels with '{}' found.".format(CONTAINER_PARAM),
             title="UNIQUBE",
@@ -451,7 +455,7 @@ def main():
                 title="UNIQUBE",
             )
             return
-        summary = populate_params(wall_panels, truss_groups)
+        summary = populate_params(units)
         sched, _panel_field = build_schedule()
         color_panel_red(sched)
 
