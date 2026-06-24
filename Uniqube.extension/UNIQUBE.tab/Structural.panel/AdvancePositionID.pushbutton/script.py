@@ -322,6 +322,67 @@ def _is_truss_key(key):
     return "[ count " in key
 
 
+def _links_with_framing():
+    """Return names of loaded links that contain framing with BIMSF_Container.
+
+    Used to give a helpful message when the panels live in a link (which
+    cannot be edited from the host), instead of a generic 'not found'.
+    """
+    names = []
+    links = (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.RevitLinkInstance)
+        .ToElements()
+    )
+    for link_inst in links:
+        ldoc = link_inst.GetLinkDocument()
+        if ldoc is None:
+            continue
+        framing = (
+            DB.FilteredElementCollector(ldoc)
+            .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
+            .WhereElementIsNotElementType()
+            .ToElements()
+        )
+        for f in framing:
+            p = f.LookupParameter(pu.PARAM_NAME)
+            if p and p.HasValue and p.AsString():
+                try:
+                    names.append(ldoc.Title)
+                except Exception:
+                    names.append("linked model")
+                break
+    return names
+
+
+def _alert_no_framing():
+    """Helpful message: explain link limitation if framing is in a link."""
+    link_names = _links_with_framing()
+    if link_names:
+        forms.alert(
+            "The structural framing with '{0}' is inside a linked model:\n"
+            "  {1}\n\n"
+            "Advance Position ID writes the ID onto each framing member, and "
+            "Revit does not allow editing elements inside a linked model from "
+            "the host.\n\n"
+            "Open that linked model directly (double-click it, or open the "
+            ".rvt), run Advance Position ID there, then save the link. The IDs "
+            "will show through in this host model.".format(
+                pu.PARAM_NAME, "\n  ".join(sorted(set(link_names)))
+            ),
+            title="UNIQUBE — Advance Position ID",
+        )
+    else:
+        forms.alert(
+            "No structural framing with '{}' found in this model.\n\n"
+            "If the panels come from Vertex BD / IFC, run 'Setup BIMSF' or "
+            "'IFC Panel Mapper' first to populate BIMSF_Container.".format(
+                pu.PARAM_NAME
+            ),
+            title="UNIQUBE",
+        )
+
+
 class PanelSelector(forms.WPFWindow):
     """Checkbox list of panels. Truss entries are shown in red."""
 
@@ -375,10 +436,7 @@ def run_reset():
     panel_elements = collect_panel_elements(doc)
 
     if not panel_elements:
-        forms.alert(
-            "No structural framing with '{}' found.".format(pu.PARAM_NAME),
-            title="UNIQUBE",
-        )
+        _alert_no_framing()
         return
 
     # Find panels that have at least one assigned element
@@ -425,10 +483,7 @@ def run_assign():
     panel_elements = collect_panel_elements(doc)
 
     if not panel_elements:
-        forms.alert(
-            "No structural framing with '{}' found.".format(pu.PARAM_NAME),
-            title="UNIQUBE",
-        )
+        _alert_no_framing()
         return
 
     # Filter out panels already fully assigned
