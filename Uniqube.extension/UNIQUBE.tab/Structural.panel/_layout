@@ -1,3 +1,4 @@
+SetupBIMSF
 IFCPanelMapper
 GroupPanels
 UngroupPanels
@@ -6,3 +7,6 @@ PanelCombineAssembly
 CreateAssemblies
 AssemblyShopDrawing
 AdvancePositionID
+>>>
+MasterPanelList
+BOMExtraction
