@@ -22,7 +22,7 @@ def main():
     if currently_on:
         turn_off = forms.alert(
             "Panel selection sync is currently ON.\n\n"
-            "Clicking panel or MEP auto-selects the full panel pair.\n\n"
+            "When ON, clicking panel or MEP can auto-expand the selection.\n\n"
             "Turn sync OFF?",
             yes=True,
             no=True,
@@ -38,10 +38,13 @@ def main():
             return
         forms.alert(
             "Panel selection sync is now OFF.\n\n"
-            "Normal Revit selection is restored.\n\n"
-            "Note: if panel elements are in a Revit group, clicking one "
-            "member may still select the whole group — that is normal Revit "
-            "behavior, not sync. Press Tab to pick a single element.",
+            "Our auto-select tool is stopped.\n\n"
+            "If clicking still selects the whole panel: after Prepare MEP "
+            "Panels, each panel is a Revit GROUP in the host model. Revit "
+            "always selects the whole group when you click one member — "
+            "that is not sync.\n\n"
+            "To pick one stud or pipe: press Tab to cycle, or right-click "
+            "the group → Edit Group.",
             title="UNIQUBE — Sync Panel Selection",
         )
         return
@@ -49,8 +52,10 @@ def main():
     turn_on = forms.alert(
         "Panel selection sync is currently OFF.\n\n"
         "Turn sync ON?\n\n"
-        "When ON, clicking any panel stud, host group, or MEP element "
-        "auto-selects the full panel + MEP pair.",
+        "Useful when the structural link is still loaded — clicking panel "
+        "or MEP auto-selects the full panel + MEP pair.\n\n"
+        "After framing is copied to the host and the link is removed, "
+        "sync is usually not needed (Revit groups already select together).",
         yes=True,
         no=True,
         title="UNIQUBE — Sync Panel Selection",

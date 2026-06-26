@@ -197,9 +197,18 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     sync_on = False
     try:
         import panel_selection_sync as pss
-        sync_on = pss.enable(uidoc)
+        if copy_stats.get("panels", 0) > 0:
+            # Host groups — sync not needed; avoids confusion after link removed.
+            pss.disable(uidoc)
+            sync_on = False
+        elif link_framing:
+            pss.enable(uidoc)
+            sync_on = True
+        else:
+            pss.disable(uidoc)
+            sync_on = False
     except Exception as ex:
-        logger.debug("sync enable failed: %s", ex)
+        logger.debug("sync setup failed: %s", ex)
 
     msg = (
         "Done.\n\n"
@@ -245,7 +254,10 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         msg += (
             "\n\nPanel framing is in the host model. "
             "Remove the structural link (Manage Links → Remove) "
-            "when all panels show OK in Verify."
+            "when all panels show OK in Verify.\n\n"
+            "Selection sync is OFF. Each panel is a Revit group — "
+            "clicking one stud or pipe selects the whole group "
+            "(normal Revit, not sync). Press Tab to pick one element."
         )
     elif link_framing:
         msg += (
