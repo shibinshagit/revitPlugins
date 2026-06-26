@@ -38,7 +38,9 @@ def main():
             return
         forms.alert(
             "Panel selection sync is now OFF.\n\n"
-            "Normal Revit selection is restored.",
+            "Normal Revit selection is restored.\n\n"
+            "If clicks still auto-select the whole panel, use pyRevit → Reload once "
+            "(clears old handlers from a previous version).",
             title="UNIQUBE — Sync Panel Selection",
         )
         return
