@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Keep panel + MEP selected together when clicking in the view.
 
-Uses UIApplication.Idling (works on all Revit versions — UIDocument
-does not expose SelectionChanged in older releases).
+State is stored on UIApplication so toggle survives pyRevit script reloads
+(each ribbon click re-imports this module with fresh module-level globals).
 """
 from System import EventHandler
 from Autodesk.Revit.UI.Events import IdlingEventArgs
@@ -10,12 +10,23 @@ from pyrevit import DB
 
 import panel_utils as pu
 
-_uiapp = None
-_idling_handler = None
-_host_doc = None
-_enabled = False
-_syncing = False
-_last_fingerprint = None
+_STATE_KEY = "_uniqube_panel_sync_state"
+
+
+def _state(uiapp):
+    """Shared sync state bag on UIApplication (persists across script runs)."""
+    st = getattr(uiapp, _STATE_KEY, None)
+    if st is None:
+        st = {
+            "enabled": False,
+            "handler": None,
+            "host_doc_title": None,
+            "syncing": False,
+            "last_fingerprint": None,
+            "generation": 0,
+        }
+        setattr(uiapp, _STATE_KEY, st)
+    return st
 
 
 def _selection_fingerprint(uidoc):
@@ -124,76 +135,89 @@ def detect_panel_from_selection(uidoc, host_doc):
     return None
 
 
-def _process_selection(uidoc):
-    global _syncing, _last_fingerprint
-    if _syncing or not _enabled:
-        return
+def _make_idling_handler(st, my_generation):
+    def _on_idling(sender, args):
+        if not st.get("enabled") or st.get("generation") != my_generation:
+            return
+        if st.get("syncing"):
+            return
+        uidoc = sender.ActiveUIDocument
+        if uidoc is None:
+            return
+        doc = uidoc.Document
+        host_title = st.get("host_doc_title")
+        if host_title and doc.Title != host_title:
+            return
 
-    doc = uidoc.Document
-    if _host_doc is not None and doc.Title != _host_doc.Title:
-        return
+        fp = _selection_fingerprint(uidoc)
+        if fp == st.get("last_fingerprint"):
+            return
 
-    fp = _selection_fingerprint(uidoc)
-    if fp == _last_fingerprint:
-        return
+        pid = detect_panel_from_selection(uidoc, doc)
+        if not pid:
+            st["last_fingerprint"] = fp
+            return
 
-    pid = detect_panel_from_selection(uidoc, doc)
-    if not pid:
-        _last_fingerprint = fp
-        return
+        try:
+            st["syncing"] = True
+            link_framing = pu.map_link_framing_by_container(doc)
+            pu.select_panel_pair(uidoc, doc, pid, link_framing)
+            st["last_fingerprint"] = _selection_fingerprint(uidoc)
+        except Exception:
+            st["last_fingerprint"] = fp
+        finally:
+            st["syncing"] = False
 
-    try:
-        _syncing = True
-        link_framing = pu.map_link_framing_by_container(doc)
-        pu.select_panel_pair(uidoc, doc, pid, link_framing)
-        _last_fingerprint = _selection_fingerprint(uidoc)
-    except Exception:
-        _last_fingerprint = fp
-    finally:
-        _syncing = False
+    return EventHandler[IdlingEventArgs](_on_idling)
 
 
-def _on_idling(sender, args):
-    if not _enabled:
-        return
-    uidoc = sender.ActiveUIDocument
+def is_enabled(uidoc):
+    """True when panel selection sync is active for this Revit session."""
     if uidoc is None:
-        return
-    _process_selection(uidoc)
-
-
-def is_enabled():
-    return _enabled
+        return False
+    return bool(_state(uidoc.Application).get("enabled"))
 
 
 def enable(uidoc):
-    global _uiapp, _idling_handler, _host_doc, _enabled, _last_fingerprint
+    """Turn panel selection sync ON."""
+    uiapp = uidoc.Application
     disable(uidoc)
-    _host_doc = uidoc.Document
-    _uiapp = uidoc.Application
-    _idling_handler = EventHandler[IdlingEventArgs](_on_idling)
-    _uiapp.Idling += _idling_handler
-    _enabled = True
-    _last_fingerprint = None
+    st = _state(uiapp)
+    st["generation"] = st.get("generation", 0) + 1
+    my_generation = st["generation"]
+    handler = _make_idling_handler(st, my_generation)
+    uiapp.Idling += handler
+    st["handler"] = handler
+    st["enabled"] = True
+    st["host_doc_title"] = uidoc.Document.Title
+    st["last_fingerprint"] = None
+    st["syncing"] = False
     return True
 
 
 def disable(uidoc):
-    global _uiapp, _idling_handler, _host_doc, _enabled, _last_fingerprint
-    if _idling_handler is not None and _uiapp is not None:
+    """Turn panel selection sync OFF."""
+    if uidoc is None:
+        return False
+    uiapp = uidoc.Application
+    st = _state(uiapp)
+    st["enabled"] = False
+    st["generation"] = st.get("generation", 0) + 1
+    st["syncing"] = False
+    st["last_fingerprint"] = None
+    handler = st.get("handler")
+    if handler is not None:
         try:
-            _uiapp.Idling -= _idling_handler
+            uiapp.Idling -= handler
         except Exception:
             pass
-    _idling_handler = None
-    _uiapp = None
-    _host_doc = None
-    _enabled = False
-    _last_fingerprint = None
+    st["handler"] = None
+    st["host_doc_title"] = None
+    return False
 
 
 def toggle(uidoc):
-    if _enabled:
+    if is_enabled(uidoc):
         disable(uidoc)
         return False
     enable(uidoc)

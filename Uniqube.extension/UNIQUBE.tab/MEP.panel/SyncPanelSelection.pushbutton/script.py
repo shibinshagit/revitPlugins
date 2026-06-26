@@ -9,30 +9,62 @@ logger = script.get_logger()
 
 def main():
     try:
-        now_on = pss.toggle(uidoc)
+        currently_on = pss.is_enabled(uidoc)
     except Exception as ex:
-        logger.debug("sync toggle failed: %s", ex)
+        logger.debug("sync state check failed: %s", ex)
         forms.alert(
-            "Sync toggle failed:\n{}\n\n"
+            "Could not read sync state:\n{}\n\n"
             "git pull revitPlugins, then pyRevit → Reload.".format(ex),
             title="UNIQUBE",
         )
         return
 
-    if now_on:
-        forms.alert(
-            "Panel selection sync is ON.\n\n"
-            "Click any panel stud, host group, or MEP element — "
-            "Revit will auto-select the full panel + MEP pair.\n\n"
-            "Click this button again to turn OFF.",
+    if currently_on:
+        turn_off = forms.alert(
+            "Panel selection sync is currently ON.\n\n"
+            "Clicking panel or MEP auto-selects the full panel pair.\n\n"
+            "Turn sync OFF?",
+            yes=True,
+            no=True,
             title="UNIQUBE — Sync Panel Selection",
         )
-    else:
+        if not turn_off:
+            return
+        try:
+            pss.disable(uidoc)
+        except Exception as ex:
+            logger.debug("sync disable failed: %s", ex)
+            forms.alert("Could not turn sync OFF:\n{}".format(ex), title="UNIQUBE")
+            return
         forms.alert(
-            "Panel selection sync is OFF.\n\n"
+            "Panel selection sync is now OFF.\n\n"
             "Normal Revit selection is restored.",
             title="UNIQUBE — Sync Panel Selection",
         )
+        return
+
+    turn_on = forms.alert(
+        "Panel selection sync is currently OFF.\n\n"
+        "Turn sync ON?\n\n"
+        "When ON, clicking any panel stud, host group, or MEP element "
+        "auto-selects the full panel + MEP pair.",
+        yes=True,
+        no=True,
+        title="UNIQUBE — Sync Panel Selection",
+    )
+    if not turn_on:
+        return
+    try:
+        pss.enable(uidoc)
+    except Exception as ex:
+        logger.debug("sync enable failed: %s", ex)
+        forms.alert("Could not turn sync ON:\n{}".format(ex), title="UNIQUBE")
+        return
+    forms.alert(
+        "Panel selection sync is now ON.\n\n"
+        "Click this button again to turn OFF.",
+        title="UNIQUBE — Sync Panel Selection",
+    )
 
 
 main()
