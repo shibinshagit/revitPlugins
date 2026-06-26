@@ -1,5 +1,5 @@
 title: Sync Panel Selection
 tooltip: >-
-  Toggle click-to-select sync ON/OFF. Shows current state (ON or OFF) before
-  changing. Prepare MEP Panels turns sync ON automatically.
+  Toggle panel groups after Prepare MEP Panels. GROUPED = panel + MEP select
+  together. UNGROUPED = individual studs/pipes for editing. Click to switch.
 author: Uniqube

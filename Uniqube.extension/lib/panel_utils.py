@@ -551,6 +551,56 @@ def _delete_groups_in_doc(doc, selected):
                         pass
 
 
+def discover_host_panel_ids(doc):
+    """Collect panel ids from host framing, groups, and link zones."""
+    panel_elements = map_framing(doc)
+    link_zones = map_framing_from_links(doc)
+    ids = get_all_panel_ids(panel_elements, link_zones)
+    for g in DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements():
+        name = strip_group_prefix(g.Name)
+        if name:
+            ids.add(name)
+    return sorted(ids, key=lambda x: panel_display_name(x).lower())
+
+
+def count_panel_groups(doc, panel_ids=None):
+    """Count Revit groups that match panel naming."""
+    if panel_ids is None:
+        panel_ids = discover_host_panel_ids(doc)
+    count = 0
+    for g in DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements():
+        for pid in panel_ids:
+            if group_matches_panel(g.Name, pid):
+                count += 1
+                break
+    return count
+
+
+def ungroup_panels_in_host(doc, panel_ids=None):
+    """Ungroup host panel groups so individual elements can be selected."""
+    if panel_ids is None:
+        panel_ids = discover_host_panel_ids(doc)
+    ungrouped = 0
+    seen = set()
+    for g in list(
+        DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements()
+    ):
+        for pid in panel_ids:
+            if not group_matches_panel(g.Name, pid):
+                continue
+            gid = g.Id.IntegerValue
+            if gid in seen:
+                break
+            try:
+                g.UngroupMembers()
+                ungrouped += 1
+                seen.add(gid)
+            except Exception:
+                pass
+            break
+    return {"ungrouped": ungrouped, "panel_ids": list(panel_ids)}
+
+
 class _CopyUseDestinationTypes(DB.IDuplicateTypeNamesHandler):
     """Auto-resolve duplicate type names during copy (no modal dialog)."""
 
@@ -805,18 +855,6 @@ def reload_links_for_paths(host_doc, paths):
 
 def select_panel_pair(uidoc, host_doc, pid, link_framing):
     """Select ONE panel's host group; include link only if framing is still linked."""
-    try:
-        from pyrevit import script as _script
-        if not _script.get_envvar("uniqube_panel_sync_active"):
-            return 0
-    except Exception:
-        try:
-            import panel_selection_sync as pss
-            if not pss.is_enabled(uidoc):
-                return 0
-        except Exception:
-            pass
-
     refs = List[DB.Reference]()
     host_framing = map_framing(host_doc)
     host_only = bool(merge_framing_for_panel(host_framing, pid))

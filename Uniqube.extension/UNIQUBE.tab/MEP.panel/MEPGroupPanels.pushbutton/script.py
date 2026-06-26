@@ -194,21 +194,11 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     link_framing = pu.map_link_framing_by_container(doc)
     copy_stats = _run_copy_to_host(selected, link_framing)
 
-    sync_on = False
     try:
         import panel_selection_sync as pss
-        if copy_stats.get("panels", 0) > 0:
-            # Host groups — sync not needed; avoids confusion after link removed.
-            pss.disable(uidoc)
-            sync_on = False
-        elif link_framing:
-            pss.enable(uidoc)
-            sync_on = True
-        else:
-            pss.disable(uidoc)
-            sync_on = False
+        pss.mark_grouped()
     except Exception as ex:
-        logger.debug("sync setup failed: %s", ex)
+        logger.debug("panel mode setup failed: %s", ex)
 
     msg = (
         "Done.\n\n"
@@ -217,14 +207,13 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         "3. Panels copied to host: {2}\n"
         "4. Framing members copied: {3}\n"
         "5. Final host groups (panel + MEP): {4}\n"
-        "6. Selection sync: {5}".format(
+        "6. Panel mode: GROUPED".format(
             group_stats.get("groups", 0),
             group_stats.get("crossing_count", 0),
             copy_stats.get("panels", 0),
             copy_stats.get("members_copied", 0),
             copy_stats.get("host_groups", 0)
             or group_stats.get("groups", 0),
-            "ON" if sync_on else "OFF",
         )
     )
 
@@ -255,19 +244,13 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
             "\n\nPanel framing is in the host model. "
             "Remove the structural link (Manage Links → Remove) "
             "when all panels show OK in Verify.\n\n"
-            "Selection sync is OFF. Each panel is a Revit group — "
-            "clicking one stud or pipe selects the whole group "
-            "(normal Revit, not sync). Press Tab to pick one element."
+            "Use Sync Panel Selection to UNGROUP for editing, "
+            "then regroup when done."
         )
     elif link_framing:
         msg += (
-            "\n\nClick any panel or MEP in the view — sync selects "
-            "the full panel + MEP pair automatically. "
-            "Use Sync Panel Selection to turn sync OFF when done."
-        )
-    elif sync_on:
-        msg += (
-            "\n\nUse Sync Panel Selection to turn sync OFF when done."
+            "\n\nUse Sync Panel Selection to ungroup/regroup panels "
+            "after copying framing to the host."
         )
 
     forms.alert(msg, title="UNIQUBE — Prepare MEP Panels")

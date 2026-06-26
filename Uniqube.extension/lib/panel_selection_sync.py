@@ -1,258 +1,100 @@
 # -*- coding: utf-8 -*-
-"""Keep panel + MEP selected together when clicking in the view.
+"""Toggle host panel groups — ungroup for editing, regroup when done.
 
-Sync ON/OFF is stored with pyRevit script env vars (shared across all ribbon
-buttons). select_panel_pair() checks the same flag so auto-selection stops
-when sync is OFF.
+After Prepare MEP Panels (link removed), each panel is a Revit group.
+Sync Panel Selection toggles:
 
-After Prepare MEP Panels copies framing into the host, elements live in Revit
-groups — clicking one member selects the whole group even with sync OFF.
-That is normal Revit behaviour; press Tab to pick a single element.
+  GROUPED (default) — panel + MEP move/select as one unit
+  UNGROUPED         — individual studs, pipes, fittings can be selected
+
+State is stored with pyRevit script env vars (shared across ribbon buttons).
 """
-from System import EventHandler
-from Autodesk.Revit.UI.Events import IdlingEventArgs
-from pyrevit import DB, script
+from pyrevit import script
 
 import panel_utils as pu
 
-_ENV_ACTIVE = "uniqube_panel_sync_active"
-_SESSIONS_KEY = "uniqube_panel_sync_sessions"
-
-# Module-level handler ref (lib module stays loaded between script runs).
-_idling_handler = None
-_idling_uiapp_id = None
+_ENV_UNGROUPED = "uniqube_panel_ungrouped"
+_STORE_PIDS = "uniqube_panel_sync_pids"
 
 
-def _sessions():
-    if _SESSIONS_KEY not in globals():
-        globals()[_SESSIONS_KEY] = {}
-    return globals()[_SESSIONS_KEY]
-
-
-def _uiapp_key(uiapp):
-    return uiapp.GetHashCode()
-
-
-def _state(uiapp):
-    sessions = _sessions()
-    key = _uiapp_key(uiapp)
-    if key not in sessions:
-        sessions[key] = {
-            "host_doc_title": None,
-            "syncing": False,
-            "last_fingerprint": None,
-        }
-    return sessions[key]
-
-
-def _set_active(value):
-    script.set_envvar(_ENV_ACTIVE, bool(value))
+def is_ungrouped(uidoc=None):
+    """True when panels are ungrouped (individual element selection)."""
+    return bool(script.get_envvar(_ENV_UNGROUPED))
 
 
 def is_enabled(uidoc=None):
-    """True when panel selection sync is active for this Revit session."""
-    val = script.get_envvar(_ENV_ACTIVE)
-    if val is None:
-        return False
-    return bool(val)
+    """Alias for is_ungrouped (legacy name)."""
+    return is_ungrouped(uidoc)
 
 
-def _selection_fingerprint(uidoc):
-    parts = []
+def is_grouped(uidoc=None):
+    return not is_ungrouped(uidoc)
+
+
+def mark_grouped():
+    script.set_envvar(_ENV_UNGROUPED, False)
+
+
+def mark_ungrouped():
+    script.set_envvar(_ENV_UNGROUPED, True)
+
+
+def _load_panel_ids(doc):
     try:
-        for eid in uidoc.Selection.GetElementIds():
-            parts.append("H{}".format(eid.IntegerValue))
+        stored = script.load_data(_STORE_PIDS, this_project=True)
+        if stored:
+            return list(stored)
     except Exception:
         pass
+    return pu.discover_host_panel_ids(doc)
+
+
+def _save_panel_ids(panel_ids):
     try:
-        for ref in uidoc.Selection.GetReferences():
-            le = ref.LinkedElementId
-            le_id = le.IntegerValue if le else -1
-            parts.append("L{}:{}".format(ref.ElementId.IntegerValue, le_id))
+        script.store_data(_STORE_PIDS, list(panel_ids), this_project=True)
     except Exception:
         pass
-    parts.sort()
-    return tuple(parts)
 
 
-def _container_value(elem):
-    if elem is None:
-        return None
-    p = elem.LookupParameter(pu.PARAM_NAME)
-    if p and p.HasValue:
-        val = p.AsString()
-        if val:
-            return val
-    p = elem.LookupParameter(pu.PANEL_NAME_PARAM)
-    if p and p.HasValue:
-        val = p.AsString()
-        if val:
-            return val
-    return None
-
-
-def _host_group_name_for_element(host_doc, elem):
-    try:
-        gid = elem.GroupId
-        if gid is None or gid == DB.ElementId.InvalidElementId:
-            return None
-        grp = host_doc.GetElement(gid)
-        if grp is not None and isinstance(grp, DB.Group):
-            return grp.Name
-    except Exception:
-        pass
-    return None
-
-
-def detect_panel_from_selection(uidoc, host_doc):
-    """Return one panel id if the current selection belongs to a single panel."""
-    panels = []
-
-    for eid in uidoc.Selection.GetElementIds():
-        el = host_doc.GetElement(eid)
-        if el is None:
-            continue
-        if isinstance(el, DB.Group):
-            panels.append(pu.panel_display_name(el.Name))
-            continue
-        c = _container_value(el)
-        if c:
-            panels.append(c)
-            continue
-        gname = _host_group_name_for_element(host_doc, el)
-        if gname:
-            panels.append(pu.panel_display_name(gname))
-
-    invalid = DB.ElementId.InvalidElementId
-    for ref in uidoc.Selection.GetReferences():
-        try:
-            link_elem_id = ref.LinkedElementId
-        except Exception:
-            link_elem_id = invalid
-        if link_elem_id is None or link_elem_id == invalid:
-            continue
-        link_inst = host_doc.GetElement(ref.ElementId)
-        if link_inst is None:
-            continue
-        link_doc = link_inst.GetLinkDocument()
-        if link_doc is None:
-            continue
-        elem = link_doc.GetElement(link_elem_id)
-        if elem is None:
-            continue
-        if isinstance(elem, DB.Group):
-            panels.append(pu.panel_display_name(elem.Name))
-            continue
-        c = _container_value(elem)
-        if c:
-            panels.append(c)
-
-    if not panels:
-        return None
-
-    displays = set()
-    canonical = []
-    for p in panels:
-        d = pu.panel_display_name(p).lower()
-        if d not in displays:
-            displays.add(d)
-            canonical.append(p)
-
-    if len(displays) == 1:
-        return canonical[0]
-    return None
-
-
-def _process_selection(uidoc, st):
-    if not is_enabled(uidoc):
-        return
-    if st.get("syncing"):
-        return
+def ungroup_panels(uidoc, view=None):
+    """Ungroup all host panel groups for individual selection."""
     doc = uidoc.Document
-    host_title = st.get("host_doc_title")
-    if host_title and doc.Title != host_title:
-        return
-
-    fp = _selection_fingerprint(uidoc)
-    if fp == st.get("last_fingerprint"):
-        return
-
-    pid = detect_panel_from_selection(uidoc, doc)
-    if not pid:
-        st["last_fingerprint"] = fp
-        return
-
-    try:
-        st["syncing"] = True
-        link_framing = pu.map_link_framing_by_container(doc)
-        pu.select_panel_pair(uidoc, doc, pid, link_framing)
-        st["last_fingerprint"] = _selection_fingerprint(uidoc)
-    except Exception:
-        st["last_fingerprint"] = fp
-    finally:
-        st["syncing"] = False
+    panel_ids = _load_panel_ids(doc)
+    stats = pu.ungroup_panels_in_host(doc, panel_ids)
+    _save_panel_ids(stats.get("panel_ids", panel_ids))
+    mark_ungrouped()
+    return stats
 
 
-def _on_idling(sender, args):
-    if not is_enabled():
-        return
-    uidoc = sender.ActiveUIDocument
-    if uidoc is None:
-        return
-    st = _state(sender)
-    _process_selection(uidoc, st)
+def regroup_panels(uidoc, view=None):
+    """Rebuild host panel groups (framing + MEP) like Prepare MEP Panels."""
+    doc = uidoc.Document
+    if view is None:
+        view = doc.ActiveView
+    panel_ids = _load_panel_ids(doc)
+    if not panel_ids:
+        panel_ids = pu.discover_host_panel_ids(doc)
+    stats = pu.regroup_panels_in_host(doc, view, panel_ids, tag_mep=False)
+    _save_panel_ids(panel_ids)
+    mark_grouped()
+    return stats
 
 
-def _detach_handler(uiapp):
-    global _idling_handler, _idling_uiapp_id
-    if _idling_handler is not None:
-        try:
-            uiapp.Idling -= _idling_handler
-        except Exception:
-            pass
-    _idling_handler = None
-    _idling_uiapp_id = None
-
-
-def _attach_handler(uiapp):
-    global _idling_handler, _idling_uiapp_id
-    key = _uiapp_key(uiapp)
-    if _idling_handler is not None and _idling_uiapp_id == key:
-        return
-    _detach_handler(uiapp)
-    _idling_handler = EventHandler[IdlingEventArgs](_on_idling)
-    uiapp.Idling += _idling_handler
-    _idling_uiapp_id = key
-
-
-def enable(uidoc):
-    """Turn panel selection sync ON."""
-    uiapp = uidoc.Application
-    st = _state(uiapp)
-    st["host_doc_title"] = uidoc.Document.Title
-    st["last_fingerprint"] = None
-    st["syncing"] = False
-    _attach_handler(uiapp)
-    _set_active(True)
+def toggle(uidoc, view=None):
+    """Toggle grouped ↔ ungrouped. Returns True if now ungrouped."""
+    if is_ungrouped(uidoc):
+        regroup_panels(uidoc, view)
+        return False
+    ungroup_panels(uidoc, view)
     return True
 
 
-def disable(uidoc):
-    """Turn panel selection sync OFF and detach the Idling handler."""
-    if uidoc is not None:
-        uiapp = uidoc.Application
-        st = _state(uiapp)
-        st["syncing"] = False
-        st["last_fingerprint"] = None
-        st["host_doc_title"] = None
-        _detach_handler(uiapp)
-    _set_active(False)
+# Legacy no-ops — Prepare MEP Panels may call these.
+def enable(uidoc):
+    mark_grouped()
     return False
 
 
-def toggle(uidoc):
-    if is_enabled(uidoc):
-        disable(uidoc)
-        return False
-    enable(uidoc)
+def disable(uidoc):
+    mark_grouped()
     return True
