@@ -7,14 +7,17 @@ Sync Panel Selection toggles:
   GROUPED (default) — panel + MEP move/select as one unit
   UNGROUPED         — individual studs, pipes, fittings can be selected
 
-State is stored with pyRevit script env vars (shared across ribbon buttons).
+Also purges legacy Idling auto-select handlers from older plugin versions.
 """
+import __main__
+
 from pyrevit import script
 
 import panel_utils as pu
 
 _ENV_UNGROUPED = "uniqube_panel_ungrouped"
 _STORE_PIDS = "uniqube_panel_sync_pids"
+_HANDLER_LIST_KEY = "_uniqube_idling_handler_list"
 
 
 def is_ungrouped(uidoc=None):
@@ -39,6 +42,60 @@ def mark_ungrouped():
     script.set_envvar(_ENV_UNGROUPED, True)
 
 
+def _handler_list():
+    if not hasattr(__main__, _HANDLER_LIST_KEY):
+        setattr(__main__, _HANDLER_LIST_KEY, [])
+    return getattr(__main__, _HANDLER_LIST_KEY)
+
+
+def purge_legacy_idling(uiapp):
+    """Remove all known UNIQUBE Idling handlers (old auto-select)."""
+    removed = 0
+
+    for handler in list(_handler_list()):
+        for _ in range(10):
+            try:
+                uiapp.Idling -= handler
+                removed += 1
+            except Exception:
+                break
+    setattr(__main__, _HANDLER_LIST_KEY, [])
+
+    for attr in (
+        "_idling_handler",
+        "_uniqube_panel_sync_handler",
+        "_uniqube_sync_handler",
+    ):
+        handler = getattr(__main__, attr, None)
+        if handler is not None:
+            for _ in range(10):
+                try:
+                    uiapp.Idling -= handler
+                    removed += 1
+                except Exception:
+                    break
+            try:
+                delattr(__main__, attr)
+            except Exception:
+                setattr(__main__, attr, None)
+
+    try:
+        import panel_selection_sync as self_module
+        handler = getattr(self_module, "_idling_handler", None)
+        if handler is not None:
+            for _ in range(10):
+                try:
+                    uiapp.Idling -= handler
+                    removed += 1
+                except Exception:
+                    break
+            self_module._idling_handler = None
+    except Exception:
+        pass
+
+    return removed
+
+
 def _load_panel_ids(doc):
     try:
         stored = script.load_data(_STORE_PIDS, this_project=True)
@@ -59,6 +116,7 @@ def _save_panel_ids(panel_ids):
 def ungroup_panels(uidoc, view=None):
     """Ungroup all host panel groups for individual selection."""
     doc = uidoc.Document
+    purge_legacy_idling(uidoc.Application)
     panel_ids = _load_panel_ids(doc)
     stats = pu.ungroup_panels_in_host(doc, panel_ids)
     _save_panel_ids(stats.get("panel_ids", panel_ids))
@@ -69,6 +127,7 @@ def ungroup_panels(uidoc, view=None):
 def regroup_panels(uidoc, view=None):
     """Rebuild host panel groups (framing + MEP) like Prepare MEP Panels."""
     doc = uidoc.Document
+    purge_legacy_idling(uidoc.Application)
     if view is None:
         view = doc.ActiveView
     panel_ids = _load_panel_ids(doc)
@@ -89,12 +148,15 @@ def toggle(uidoc, view=None):
     return True
 
 
-# Legacy no-ops — Prepare MEP Panels may call these.
 def enable(uidoc):
     mark_grouped()
+    if uidoc is not None:
+        purge_legacy_idling(uidoc.Application)
     return False
 
 
 def disable(uidoc):
     mark_grouped()
+    if uidoc is not None:
+        purge_legacy_idling(uidoc.Application)
     return True

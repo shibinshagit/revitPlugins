@@ -854,66 +854,7 @@ def reload_links_for_paths(host_doc, paths):
 
 
 def select_panel_pair(uidoc, host_doc, pid, link_framing):
-    """Select ONE panel's host group; include link only if framing is still linked."""
-    refs = List[DB.Reference]()
-    host_framing = map_framing(host_doc)
-    host_only = bool(merge_framing_for_panel(host_framing, pid))
-    links = (
-        DB.FilteredElementCollector(host_doc)
-        .OfClass(DB.RevitLinkInstance)
-        .ToElements()
-    )
-
-    for g in (
-        DB.FilteredElementCollector(host_doc)
-        .OfClass(DB.Group)
-        .ToElements()
-    ):
-        if not group_matches_panel(g.Name, pid):
-            continue
-        try:
-            refs.Add(DB.Reference(g))
-        except Exception:
-            pass
-        break
-
-    if host_only:
-        if refs.Count > 0:
-            uidoc.Selection.SetReferences(refs)
-            return refs.Count
-        return 0
-
-    link_group_found = False
-    for link_inst in links:
-        link_doc = link_inst.GetLinkDocument()
-        if link_doc is None:
-            continue
-        for g in (
-            DB.FilteredElementCollector(link_doc)
-            .OfClass(DB.Group)
-            .ToElements()
-        ):
-            if not group_matches_panel(g.Name, pid):
-                continue
-            try:
-                refs.Add(DB.Reference(g).CreateLinkReference(link_inst))
-                link_group_found = True
-            except Exception:
-                pass
-            break
-
-    if not link_group_found:
-        if link_framing is None:
-            link_framing = map_link_framing_by_container(host_doc)
-        for link_inst, elem in merge_link_framing_for_panel(link_framing, pid):
-            try:
-                refs.Add(DB.Reference(elem).CreateLinkReference(link_inst))
-            except Exception:
-                pass
-
-    if refs.Count > 0:
-        uidoc.Selection.SetReferences(refs)
-        return refs.Count
+    """Deprecated — auto-select removed. Use Sync Panel Selection to group/ungroup."""
     return 0
 
 

@@ -197,6 +197,7 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     try:
         import panel_selection_sync as pss
         pss.mark_grouped()
+        pss.purge_legacy_idling(uidoc.Application)
     except Exception as ex:
         logger.debug("panel mode setup failed: %s", ex)
 

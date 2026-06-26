@@ -24,6 +24,13 @@ def main():
         return
 
     try:
+        removed = pss.purge_legacy_idling(uidoc.Application)
+        if removed:
+            logger.debug("purged %s legacy idling handler(s)", removed)
+    except Exception as ex:
+        logger.debug("idling purge failed: %s", ex)
+
+    try:
         panel_ids = pu.discover_host_panel_ids(doc)
         group_count = pu.count_panel_groups(doc, panel_ids)
     except Exception as ex:
@@ -59,15 +66,17 @@ def main():
         except Exception as ex:
             forms.alert("Ungroup failed:\n{}".format(ex), title="UNIQUBE")
             return
-        forms.alert(
-            "Panels are now UNGROUPED.\n\n"
-            "Groups dissolved: {}\n\n"
-            "Select individual studs and pipes. "
-            "Click this button again to regroup panel + MEP.".format(
-                stats.get("ungrouped", 0)
-            ),
-            title="UNIQUBE — Sync Panel Selection",
-        )
+    forms.alert(
+        "Panels are now UNGROUPED.\n\n"
+        "Groups dissolved: {}\n\n"
+        "Select individual studs and pipes. "
+        "Click this button again to regroup panel + MEP.\n\n"
+        "If selection still jumps to framing after a few seconds, "
+        "close and reopen Revit once (clears old auto-select).".format(
+            stats.get("ungrouped", 0)
+        ),
+        title="UNIQUBE — Sync Panel Selection",
+    )
         return
 
     turn_on = forms.alert(
