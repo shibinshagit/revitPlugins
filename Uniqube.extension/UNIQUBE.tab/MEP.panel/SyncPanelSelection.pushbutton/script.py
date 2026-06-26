@@ -10,6 +10,24 @@ view = doc.ActiveView
 logger = script.get_logger()
 
 
+def _link_warning(doc):
+    if not hasattr(pu, "get_framing_link_names"):
+        return None
+    names = pu.get_framing_link_names(doc)
+    if not names:
+        return None
+    return (
+        "Structural link still loaded:\n  {0}\n\n"
+        "If status bar says 'LINK : Conduits' or 'LINK : Pipes', you are "
+        "clicking the linked model — selection will jump to linked panel "
+        "framing (e.g. 9 studs), not host MEP.\n\n"
+        "Remove the link: Manage Links → Remove\n"
+        "Then select HOST elements only (status bar must NOT say LINK).".format(
+            "\n  ".join(names[:4])
+        )
+    )
+
+
 def main():
     if isinstance(view, DB.ViewSheet):
         forms.alert("Open a model view, not a sheet.", title="UNIQUBE")
@@ -50,11 +68,18 @@ def main():
         )
         return
 
+    link_msg = _link_warning(doc)
+
     if group_count > 0:
-        turn_off = forms.alert(
+        prompt = (
             "Panels are currently GROUPED ({0} group(s)).\n\n"
             "Each panel (framing + MEP) selects as one Revit group.\n\n"
-            "Ungroup for individual element selection?".format(group_count),
+            "Ungroup for individual element selection?".format(group_count)
+        )
+        if link_msg:
+            prompt = link_msg + "\n\n" + prompt
+        turn_off = forms.alert(
+            prompt,
             yes=True,
             no=True,
             title="UNIQUBE — Sync Panel Selection",
@@ -67,22 +92,30 @@ def main():
         except Exception as ex:
             forms.alert("Ungroup failed:\n{}".format(ex), title="UNIQUBE")
             return
-        forms.alert(
+        msg = (
             "Panels are now UNGROUPED.\n\n"
-            "Groups dissolved: {}\n\n"
-            "Select individual studs and pipes.\n"
-            "Selection guard is ON — auto panel-select is blocked.\n\n"
-            "Click this button again to regroup panel + MEP.".format(
-                stats.get("ungrouped", 0)
-            ),
-            title="UNIQUBE — Sync Panel Selection",
+            "Groups dissolved: {0}\n"
+            "Assemblies disassembled: {1}\n\n"
+            "Select HOST studs and pipes only.\n"
+            "Selection guard is ON.\n\n"
+            "Click this button again to regroup.".format(
+                stats.get("ungrouped", 0),
+                stats.get("disassembled", 0),
+            )
         )
+        if link_msg:
+            msg += "\n\n" + link_msg
+        forms.alert(msg, title="UNIQUBE — Sync Panel Selection")
         return
 
-    turn_on = forms.alert(
+    prompt = (
         "Panels are currently UNGROUPED.\n\n"
-        "Individual studs and pipes can be selected.\n\n"
-        "Regroup panel + MEP back together?",
+        "Regroup panel + MEP back together?"
+    )
+    if link_msg:
+        prompt = link_msg + "\n\n" + prompt
+    turn_on = forms.alert(
+        prompt,
         yes=True,
         no=True,
         title="UNIQUBE — Sync Panel Selection",

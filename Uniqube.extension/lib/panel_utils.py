@@ -577,7 +577,7 @@ def count_panel_groups(doc, panel_ids=None):
 
 
 def ungroup_panels_in_host(doc, panel_ids=None):
-    """Ungroup host panel groups so individual elements can be selected."""
+    """Ungroup host panel groups and disassemble host assemblies."""
     if panel_ids is None:
         panel_ids = discover_host_panel_ids(doc)
     ungrouped = 0
@@ -598,7 +598,62 @@ def ungroup_panels_in_host(doc, panel_ids=None):
             except Exception:
                 pass
             break
-    return {"ungrouped": ungrouped, "panel_ids": list(panel_ids)}
+
+    disassembled = 0
+    for asm in list(
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    ):
+        asm_name = ""
+        try:
+            asm_name = asm.AssemblyTypeName or ""
+        except Exception:
+            pass
+        if not asm_name:
+            try:
+                asm_name = asm.Name or ""
+            except Exception:
+                pass
+        for pid in panel_ids:
+            if not group_matches_panel(asm_name, pid):
+                continue
+            try:
+                asm.Disassemble()
+                disassembled += 1
+            except Exception:
+                pass
+            break
+
+    return {
+        "ungrouped": ungrouped,
+        "disassembled": disassembled,
+        "panel_ids": list(panel_ids),
+    }
+
+
+def get_framing_link_names(doc):
+    """Return names of loaded links that contain structural framing."""
+    names = []
+    links = (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.RevitLinkInstance)
+        .ToElements()
+    )
+    for link_inst in links:
+        link_doc = link_inst.GetLinkDocument()
+        if link_doc is None:
+            continue
+        if map_framing(link_doc):
+            try:
+                names.append(link_inst.Name)
+            except Exception:
+                names.append("Revit Link")
+    return names
+
+
+def has_framing_links(doc):
+    return bool(get_framing_link_names(doc))
 
 
 class _CopyUseDestinationTypes(DB.IDuplicateTypeNamesHandler):

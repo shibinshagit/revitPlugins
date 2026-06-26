@@ -146,6 +146,36 @@ def _classify_snapshot(uidoc, snapshot):
                 framing += 1
             elif bic in pu.MEP_CATS:
                 mep += 1
+    invalid = DB.ElementId.InvalidElementId
+    for ref in snapshot.get("refs") or []:
+        try:
+            link_elem_id = ref.LinkedElementId
+        except Exception:
+            link_elem_id = invalid
+        if link_elem_id is None or link_elem_id == invalid:
+            el = doc.GetElement(ref.ElementId)
+            if el is None or el.Category is None:
+                continue
+            bic = el.Category.BuiltInCategory
+            if bic == DB.BuiltInCategory.OST_StructuralFraming:
+                framing += 1
+            elif bic in pu.MEP_CATS:
+                mep += 1
+            continue
+        link_inst = doc.GetElement(ref.ElementId)
+        if link_inst is None:
+            continue
+        link_doc = link_inst.GetLinkDocument()
+        if link_doc is None:
+            continue
+        elem = link_doc.GetElement(link_elem_id)
+        if elem is None or elem.Category is None:
+            continue
+        bic = elem.Category.BuiltInCategory
+        if bic == DB.BuiltInCategory.OST_StructuralFraming:
+            framing += 1
+        elif bic in pu.MEP_CATS:
+            mep += 1
     return framing, mep
 
 
@@ -179,7 +209,7 @@ def _on_guard_idling(sender, args):
         return
 
     framing, mep = _classify_selection(uidoc)
-    if mep > 0 or framing <= 1:
+    if not (framing >= 2 and mep == 0):
         _guard_state["snapshot"] = _capture_selection(uidoc)
 
 
