@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """Shared helpers for BIMSF panel scripts — framing map, MEP zone, link support."""
+import random
+
 from pyrevit import revit, DB
 from System.Collections.Generic import List
 
@@ -146,6 +148,42 @@ def map_framing_from_links(doc):
     return link_zones
 
 
+def map_link_framing_by_container(doc):
+    """Return {panel_id: [(link_inst, elem), ...]} for linked framing only.
+
+    Each member is matched by its own BIMSF_Container — not the whole link
+    model — so only that panel's studs/tracks are highlighted.
+    """
+    result = {}
+    links = (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.RevitLinkInstance)
+        .ToElements()
+    )
+    for link_inst in links:
+        link_doc = link_inst.GetLinkDocument()
+        if link_doc is None:
+            continue
+        framing = (
+            DB.FilteredElementCollector(link_doc)
+            .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
+            .WhereElementIsNotElementType()
+            .ToElements()
+        )
+        for beam in framing:
+            p_param = beam.LookupParameter(PARAM_NAME)
+            if p_param and p_param.HasValue:
+                pid = p_param.AsString()
+                if pid:
+                    result.setdefault(pid, []).append((link_inst, beam))
+    return result
+
+
+def count_link_framing(link_framing_map):
+    """Return {panel_id: member_count} from map_link_framing_by_container."""
+    return {pid: len(items) for pid, items in link_framing_map.items()}
+
+
 def get_all_panel_ids(panel_elements, link_zones=None):
     ids = set(panel_elements.keys())
     if link_zones:
@@ -275,18 +313,22 @@ def preview_crossing_mep(doc, panel_elements, link_zones):
 def build_panel_catalog(doc):
     """Build panel rows for the MEP grouping UI.
 
-    Each row: pid, display, source, mep_count, link_name, host_framing.
+    Each row: pid, display, source, mep_count, link_name, host_framing,
+    link_framing.
     """
     panel_elements = map_framing(doc)
     link_zones = map_framing_from_links(doc)
     link_sources = map_framing_link_sources(doc)
+    link_framing = map_link_framing_by_container(doc)
+    link_framing_counts = count_link_framing(link_framing)
     mep_counts = preview_mep_counts(doc, panel_elements, link_zones)
     all_pids = get_all_panel_ids(panel_elements, link_zones)
 
     rows = []
     for pid in sorted(all_pids, key=lambda x: panel_display_name(x).lower()):
         host_count = len(panel_elements.get(pid, []))
-        in_link = pid in link_zones
+        link_count = link_framing_counts.get(pid, 0)
+        in_link = pid in link_zones or link_count > 0
         if host_count and in_link:
             source = "host + link"
         elif in_link:
@@ -300,8 +342,9 @@ def build_panel_catalog(doc):
             "mep_count": mep_counts.get(pid, 0),
             "link_name": link_sources.get(pid, ""),
             "host_framing": host_count,
+            "link_framing": link_count,
         })
-    return rows, panel_elements, link_zones
+    return rows, panel_elements, link_zones, link_framing
 
 
 def _host_bbox_in_outline(elem, outline):
@@ -394,15 +437,153 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
             )
             for elem in candidates:
                 matched = set()
-                for pid, outline in panel_outlines.items():
-                    if _link_bbox_in_outline(elem, transform, outline):
-                        matched.add(pid)
+                cat = elem.Category
+                is_framing = (
+                    cat is not None
+                    and cat.BuiltInCategory
+                    == DB.BuiltInCategory.OST_StructuralFraming
+                )
+                if is_framing:
+                    # Panel studs/tracks: match BIMSF_Container only (not
+                    # spatial zone — avoids coloring the whole link).
+                    p_param = elem.LookupParameter(PARAM_NAME)
+                    if p_param and p_param.HasValue:
+                        pid = p_param.AsString()
+                        if pid and pid in all_pids:
+                            matched.add(pid)
+                else:
+                    for pid, outline in panel_outlines.items():
+                        if _link_bbox_in_outline(elem, transform, outline):
+                            matched.add(pid)
                 if not matched:
                     continue
                 link_assignments.append((link_inst, elem, matched))
                 stats["link_matched"] += 1
 
     return host_assignments, link_assignments, stats
+
+
+def _view_color_kit(doc):
+    """Fill pattern + red override + factory for random panel colors."""
+    fill_pattern = (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.FillPatternElement)
+        .FirstElement()
+    )
+    red_settings = DB.OverrideGraphicSettings()
+    if fill_pattern:
+        red_settings.SetSurfaceForegroundPatternId(fill_pattern.Id)
+        red_settings.SetSurfaceForegroundPatternColor(DB.Color(255, 0, 0))
+
+    def panel_settings():
+        r = random.randint(0, 180)
+        g = random.randint(50, 255)
+        b = random.randint(50, 255)
+        settings = DB.OverrideGraphicSettings()
+        if fill_pattern:
+            settings.SetSurfaceForegroundPatternId(fill_pattern.Id)
+            settings.SetSurfaceForegroundPatternColor(DB.Color(r, g, b))
+        return settings
+
+    return red_settings, panel_settings
+
+
+def combine_panels_group_color(
+    doc,
+    view,
+    selected,
+    panel_elements,
+    link_zones,
+    link_framing=None,
+    tag_mep=True,
+):
+    """Group host panel + MEP and color like Panel Combine (Color).
+
+    Host framing and MEP go into Revit groups. Linked panel framing is
+    colored in the active view by BIMSF_Container (cannot be grouped in
+    the host). Crossing MEP is marked red.
+    """
+    if link_framing is None:
+        link_framing = map_link_framing_by_container(doc)
+
+    mep_assignments, link_assignments, link_stats = assign_mep_to_panels(
+        doc, panel_elements, link_zones
+    )
+    red_settings, panel_settings = _view_color_kit(doc)
+
+    stats = {
+        "groups": 0,
+        "mep_tagged": 0,
+        "host_framing": 0,
+        "link_framing_colored": 0,
+        "crossing_count": 0,
+        "skipped_empty": 0,
+        "link_matched": link_stats.get("link_matched", 0),
+    }
+
+    processed_crossings = set()
+
+    for pid in selected:
+        settings = panel_settings()
+        group_ids = List[DB.ElementId]()
+
+        for el in panel_elements.get(pid, []):
+            view.SetElementOverrides(el.Id, settings)
+            group_ids.Add(el.Id)
+            stats["host_framing"] += 1
+
+        for link_inst, elem in link_framing.get(pid, []):
+            if set_link_element_override(view, link_inst, elem, settings):
+                stats["link_framing_colored"] += 1
+
+        for eid, pids in mep_assignments.items():
+            el = doc.GetElement(eid)
+            if el is None:
+                continue
+            if len(pids) == 1 and list(pids)[0] == pid:
+                group_ids.Add(eid)
+                view.SetElementOverrides(eid, settings)
+                if tag_mep:
+                    set_panel_labels(el, pid)
+                    stats["mep_tagged"] += 1
+            elif len(pids) > 1 and pid in pids:
+                view.SetElementOverrides(eid, red_settings)
+                if eid not in processed_crossings:
+                    processed_crossings.add(eid)
+                    stats["crossing_count"] += 1
+                if tag_mep:
+                    p = el.LookupParameter(PARAM_NAME)
+                    if p and not p.IsReadOnly:
+                        try:
+                            p.Set("")
+                        except Exception:
+                            pass
+
+        for link_inst, elem, pids in link_assignments:
+            is_framing = (
+                elem.Category is not None
+                and elem.Category.BuiltInCategory
+                == DB.BuiltInCategory.OST_StructuralFraming
+            )
+            if is_framing:
+                continue
+            if len(pids) == 1 and list(pids)[0] == pid:
+                set_link_element_override(view, link_inst, elem, settings)
+            elif len(pids) > 1 and pid in pids:
+                set_link_element_override(view, link_inst, elem, red_settings)
+                stats["crossing_count"] += 1
+
+        if group_ids.Count > 1:
+            try:
+                new_grp = doc.Create.NewGroup(group_ids)
+                new_grp.GroupType.Name = panel_group_name(pid)
+                stats["groups"] += 1
+            except Exception:
+                pass
+        elif group_ids.Count == 0 and not link_framing.get(pid):
+            stats["skipped_empty"] += 1
+
+    return stats
 
 
 def set_link_element_override(view, link_inst, elem, override_settings):

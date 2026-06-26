@@ -1,5 +1,6 @@
 title: MEP Group Panels
 tooltip: >-
-  List panels from linked/host framing (BIMSF_Container), assign host MEP
-  elements to each panel zone, and create Revit groups for shop drawings.
+  List panels from linked/host framing, group host panel + MEP, color linked
+  panel framing and crossings (same as Panel Combine Color). Tags MEP for
+  shop drawings.
 author: Uniqube
