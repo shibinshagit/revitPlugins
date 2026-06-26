@@ -250,7 +250,12 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     elif link_framing:
         msg += (
             "\n\nClick any panel or MEP in the view — sync selects "
-            "the full panel + MEP pair automatically."
+            "the full panel + MEP pair automatically. "
+            "Use Sync Panel Selection to turn sync OFF when done."
+        )
+    elif sync_on:
+        msg += (
+            "\n\nUse Sync Panel Selection to turn sync OFF when done."
         )
 
     forms.alert(msg, title="UNIQUBE — Prepare MEP Panels")

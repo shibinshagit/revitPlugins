@@ -1,0 +1,6 @@
+title: Sync Panel Selection
+tooltip: >-
+  Toggle click-to-select sync ON/OFF. When ON, clicking a panel stud, host
+  group, or MEP element auto-selects the full panel + MEP pair. Prepare MEP
+  Panels turns sync ON automatically.
+author: Uniqube
