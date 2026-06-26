@@ -1115,13 +1115,10 @@ def select_panel_pair(uidoc, host_doc, pid, link_framing):
             break
 
     if not link_group_found:
-        if link_framing is None:
-            link_framing = map_link_framing_by_container(host_doc)
-        for link_inst, elem in merge_link_framing_for_panel(link_framing, pid):
-            try:
-                refs.Add(DB.Reference(elem).CreateLinkReference(link_inst))
-            except Exception:
-                pass
+        # Do not select hundreds of individual linked studs — causes UI flicker.
+        # Use panel groups in the link file, or run Prepare MEP Panels to copy
+        # framing to host and create a host group.
+        pass
 
     if refs.Count > 0:
         uidoc.Selection.SetReferences(refs)

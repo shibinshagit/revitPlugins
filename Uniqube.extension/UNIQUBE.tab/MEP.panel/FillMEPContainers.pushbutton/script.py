@@ -87,6 +87,15 @@ def main():
     if not selected:
         return
 
+    sync_was_on = False
+    try:
+        import panel_selection_sync as pss
+        if pss.is_enabled():
+            sync_was_on = True
+            pss.disable(uidoc)
+    except Exception:
+        pass
+
     stats = {}
     with revit.Transaction("UNIQUBE: Fill BIMSF_Container"):
         stats = pu.fill_mep_bimsf_containers(
@@ -111,6 +120,13 @@ def main():
         ),
         title="UNIQUBE — Fill BIMSF Container",
     )
+    if sync_was_on:
+        forms.alert(
+            "Selection sync was turned OFF during fill to prevent "
+            "Revit flickering.\n\n"
+            "Use Sync Panel Selection when you want paired click-select again.",
+            title="UNIQUBE — Sync Panel Selection",
+        )
 
 
 main()

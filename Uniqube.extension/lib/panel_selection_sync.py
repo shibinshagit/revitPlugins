@@ -15,7 +15,9 @@ _idling_handler = None
 _host_doc = None
 _enabled = False
 _syncing = False
-_last_fingerprint = None
+_last_panel_key = None
+_link_framing_cache = None
+_link_framing_doc_title = None
 
 
 def _selection_fingerprint(uidoc):
@@ -34,6 +36,12 @@ def _selection_fingerprint(uidoc):
         pass
     parts.sort()
     return tuple(parts)
+
+
+def _panel_key(pid):
+    if not pid:
+        return None
+    return pu.panel_display_name(pid).lower()
 
 
 def _container_value(elem):
@@ -63,6 +71,38 @@ def _host_group_name_for_element(host_doc, elem):
     except Exception:
         pass
     return None
+
+
+def _host_group_for_panel(host_doc, pid):
+    for g in (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.Group)
+        .ToElements()
+    ):
+        if pu.group_matches_panel(g.Name, pid):
+            return g
+    return None
+
+
+def _selection_includes_group(uidoc, group):
+    if group is None:
+        return False
+    gid = group.Id.IntegerValue
+    try:
+        for eid in uidoc.Selection.GetElementIds():
+            if eid.IntegerValue == gid:
+                return True
+    except Exception:
+        pass
+    try:
+        for ref in uidoc.Selection.GetReferences():
+            if ref.LinkedElementId != DB.ElementId.InvalidElementId:
+                continue
+            if ref.ElementId.IntegerValue == gid:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def detect_panel_from_selection(uidoc, host_doc):
@@ -124,8 +164,17 @@ def detect_panel_from_selection(uidoc, host_doc):
     return None
 
 
+def _cached_link_framing(doc):
+    global _link_framing_cache, _link_framing_doc_title
+    title = doc.Title
+    if _link_framing_cache is None or _link_framing_doc_title != title:
+        _link_framing_cache = pu.map_link_framing_by_container(doc)
+        _link_framing_doc_title = title
+    return _link_framing_cache
+
+
 def _process_selection(uidoc):
-    global _syncing, _last_fingerprint
+    global _syncing, _last_panel_key
     if _syncing or not _enabled:
         return
 
@@ -134,21 +183,31 @@ def _process_selection(uidoc):
         return
 
     fp = _selection_fingerprint(uidoc)
-    if fp == _last_fingerprint:
+    if not fp:
+        _last_panel_key = None
         return
 
     pid = detect_panel_from_selection(uidoc, doc)
     if not pid:
-        _last_fingerprint = fp
+        _last_panel_key = None
+        return
+
+    panel_key = _panel_key(pid)
+    if panel_key == _last_panel_key:
+        return
+
+    host_group = _host_group_for_panel(doc, pid)
+    if _selection_includes_group(uidoc, host_group):
+        _last_panel_key = panel_key
         return
 
     try:
         _syncing = True
-        link_framing = pu.map_link_framing_by_container(doc)
+        link_framing = _cached_link_framing(doc)
         pu.select_panel_pair(uidoc, doc, pid, link_framing)
-        _last_fingerprint = _selection_fingerprint(uidoc)
+        _last_panel_key = panel_key
     except Exception:
-        _last_fingerprint = fp
+        _last_panel_key = panel_key
     finally:
         _syncing = False
 
@@ -167,19 +226,23 @@ def is_enabled():
 
 
 def enable(uidoc):
-    global _uiapp, _idling_handler, _host_doc, _enabled, _last_fingerprint
+    global _uiapp, _idling_handler, _host_doc, _enabled, _last_panel_key
+    global _link_framing_cache, _link_framing_doc_title
     disable(uidoc)
     _host_doc = uidoc.Document
     _uiapp = uidoc.Application
     _idling_handler = EventHandler[IdlingEventArgs](_on_idling)
     _uiapp.Idling += _idling_handler
     _enabled = True
-    _last_fingerprint = None
+    _last_panel_key = None
+    _link_framing_cache = None
+    _link_framing_doc_title = None
     return True
 
 
 def disable(uidoc):
-    global _uiapp, _idling_handler, _host_doc, _enabled, _last_fingerprint
+    global _uiapp, _idling_handler, _host_doc, _enabled, _last_panel_key
+    global _link_framing_cache, _link_framing_doc_title
     if _idling_handler is not None and _uiapp is not None:
         try:
             _uiapp.Idling -= _idling_handler
@@ -189,7 +252,9 @@ def disable(uidoc):
     _uiapp = None
     _host_doc = None
     _enabled = False
-    _last_fingerprint = None
+    _last_panel_key = None
+    _link_framing_cache = None
+    _link_framing_doc_title = None
 
 
 def toggle(uidoc):
