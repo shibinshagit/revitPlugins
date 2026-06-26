@@ -1,0 +1,5 @@
+title: Copy Panel to Host
+tooltip: >-
+  Copy linked panel framing into the MEP host model, explode groups, and
+  regroup panel + MEP together so the structural link can be removed.
+author: Uniqube
