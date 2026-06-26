@@ -128,7 +128,127 @@ BEND_OR_FITTING_PARAM = "Bend or Fitting"
 # Host + link spatial assignment for panel grouping workflows.
 LINK_ASSIGN_CATS = MEP_CATS + [DB.BuiltInCategory.OST_StructuralFraming]
 
-ZONE_PAD_FT = 0.2
+ZONE_PAD_FT = 1.0
+
+
+def canonical_panel_id(pid, known_pids):
+    """Return the framing model's exact panel id string (e.g. *ELB-1001)."""
+    if not pid:
+        return pid
+    for kp in known_pids:
+        if panel_ids_match(kp, pid):
+            return kp
+    return pid
+
+
+def _build_panel_outlines(panel_elements, link_zones):
+    outlines = {}
+    all_pids = get_all_panel_ids(panel_elements, link_zones)
+    for pid in all_pids:
+        host_elems = merge_framing_for_panel(panel_elements, pid)
+        lz = link_zones.get(pid, []) if link_zones else []
+        if not host_elems and not lz:
+            for key in panel_elements:
+                if panel_ids_match(key, pid):
+                    host_elems = panel_elements[key]
+                    break
+            if link_zones:
+                for key in link_zones:
+                    if panel_ids_match(key, pid):
+                        lz = link_zones[key]
+                        break
+        min_pt, max_pt = compute_panel_bbox(host_elems, lz)
+        outlines[pid] = _panel_outline(min_pt, max_pt)
+    return outlines
+
+
+def _point_in_outline(pt, outline):
+    try:
+        return outline.Contains(pt, 0.001)
+    except Exception:
+        return False
+
+
+def _endpoint_panels(elem, panel_outlines):
+    """Return (start_panels, end_panels) for an MEPCurve."""
+    loc = elem.Location
+    if not isinstance(loc, DB.LocationCurve):
+        return set(), set()
+    curve = loc.Curve
+    if curve is None:
+        return set(), set()
+    try:
+        start = curve.GetEndPoint(0)
+        end = curve.GetEndPoint(1)
+    except Exception:
+        return set(), set()
+    start_p = {
+        pid for pid, outline in panel_outlines.items()
+        if _point_in_outline(start, outline)
+    }
+    end_p = {
+        pid for pid, outline in panel_outlines.items()
+        if _point_in_outline(end, outline)
+    }
+    return start_p, end_p
+
+
+def _refine_curve_assignments(doc, host_assignments, panel_outlines):
+    """Assign conduits/pipes from curve endpoints inside panel zones."""
+    refined = 0
+    for eid in list(host_assignments.keys()):
+        el = doc.GetElement(eid)
+        if el is None or not isinstance(el, DB.MEPCurve):
+            continue
+        start_p, end_p = _endpoint_panels(el, panel_outlines)
+        chosen = None
+        if len(start_p) == 1 and start_p == end_p:
+            chosen = list(start_p)[0]
+        elif len(start_p) == 1 and not end_p:
+            chosen = list(start_p)[0]
+        elif len(end_p) == 1 and not start_p:
+            chosen = list(end_p)[0]
+        else:
+            common = start_p & end_p
+            if len(common) == 1:
+                chosen = list(common)[0]
+        if chosen and host_assignments[eid] != set([chosen]):
+            host_assignments[eid] = set([chosen])
+            refined += 1
+    return refined
+
+
+def _resolve_panel_for_element(el, host_assignments, panel_outlines, spatial_pids):
+    """Pick one panel using connectors, curve endpoints, or spatial overlap."""
+    valid_ids = set(eid.IntegerValue for eid in host_assignments.keys())
+    conn_panels = set()
+    for nb in _mep_network_neighbors(el, valid_ids):
+        nb_p = host_assignments.get(nb.Id, set())
+        if len(nb_p) == 1:
+            conn_panels.add(list(nb_p)[0])
+    if len(conn_panels) == 1:
+        return list(conn_panels)[0]
+
+    if isinstance(el, DB.MEPCurve):
+        start_p, end_p = _endpoint_panels(el, panel_outlines)
+        if len(start_p) == 1 and start_p == end_p:
+            return list(start_p)[0]
+        if len(start_p) == 1 and not end_p:
+            return list(start_p)[0]
+        if len(end_p) == 1 and not start_p:
+            return list(end_p)[0]
+        common = start_p & end_p
+        if len(common) == 1:
+            return list(common)[0]
+        endpoint_hit = start_p | end_p
+        if spatial_pids:
+            overlap = endpoint_hit & set(spatial_pids)
+            if len(overlap) == 1:
+                return list(overlap)[0]
+
+    if len(spatial_pids) == 1:
+        return list(spatial_pids)[0]
+    return None
 
 
 def get_mep_filter():
@@ -291,14 +411,26 @@ def _bbox_intersects_outline(bbox, outline):
     return outline.Intersects(bb_outline, 0.001)
 
 
-def _set_container(elem, pid):
+def _set_container(elem, pid, known_pids=None):
+    pid = canonical_panel_id(pid, known_pids or [])
+    candidates = []
+    for val in [pid, panel_display_name(pid)]:
+        if val and val not in candidates:
+            candidates.append(val)
+    disp = panel_display_name(pid)
+    if disp:
+        star = "*" + disp
+        if star not in candidates:
+            candidates.append(star)
     p = elem.LookupParameter(PARAM_NAME)
-    if p and not p.IsReadOnly:
+    if p is None or p.IsReadOnly:
+        return False
+    for val in candidates:
         try:
-            p.Set(pid)
+            p.Set(val)
             return True
         except Exception:
-            return False
+            continue
     return False
 
 
@@ -483,10 +615,13 @@ def _append_bimsf_param_assignments(doc, panel_outlines, host_assignments):
             host_assignments[item.Id].add(pid)
 
 
-def set_panel_labels(elem, panel_id):
+def set_panel_labels(elem, panel_id, known_pids=None):
     """Write BIMSF_Container and Panel Name on a host element."""
-    display = panel_display_name(panel_id)
-    _set_container(elem, panel_id)
+    if known_pids is None:
+        known_pids = []
+    pid = canonical_panel_id(panel_id, known_pids)
+    display = panel_display_name(pid)
+    _set_container(elem, pid, known_pids)
     p = elem.LookupParameter(PANEL_NAME_PARAM)
     if p and not p.IsReadOnly:
         try:
@@ -632,12 +767,7 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
         host_assignments[item.Id] = set()
 
     all_pids = get_all_panel_ids(panel_elements, link_zones)
-    panel_outlines = {}
-    for pid in all_pids:
-        host_elements = panel_elements.get(pid, [])
-        lz = link_zones.get(pid, []) if link_zones else []
-        min_pt, max_pt = compute_panel_bbox(host_elements, lz)
-        panel_outlines[pid] = _panel_outline(min_pt, max_pt)
+    panel_outlines = _build_panel_outlines(panel_elements, link_zones)
 
     for pid, outline in panel_outlines.items():
         nearby = (
@@ -686,7 +816,9 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
                     p_param = elem.LookupParameter(PARAM_NAME)
                     if p_param and p_param.HasValue:
                         pid = p_param.AsString()
-                        if pid and pid in all_pids:
+                        if pid and any(
+                            panel_ids_match(pid, k) for k in all_pids
+                        ):
                             matched.add(pid)
                 else:
                     for pid, outline in panel_outlines.items():
@@ -698,8 +830,12 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
                 stats["link_matched"] += 1
 
     known_pids = list(all_pids)
+    stats["curve_refined"] = _refine_curve_assignments(
+        doc, host_assignments, panel_outlines
+    )
     _seed_assignments_from_parameters(doc, host_assignments, known_pids)
     stats["propagated"] = propagate_panel_assignments(doc, host_assignments)
+    stats["propagated"] += propagate_panel_assignments(doc, host_assignments)
 
     return host_assignments, link_assignments, stats
 
@@ -727,11 +863,14 @@ def fill_mep_bimsf_containers(
         "skipped_no_param": 0,
         "unassigned": 0,
         "propagated": 0,
+        "resolved": 0,
     }
     mep_assignments, _, assign_stats = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
     stats["propagated"] = assign_stats.get("propagated", 0)
+    panel_outlines = _build_panel_outlines(panel_elements, link_zones)
+    known_pids = list(get_all_panel_ids(panel_elements, link_zones))
 
     for eid, pids in mep_assignments.items():
         el = doc.GetElement(eid)
@@ -743,16 +882,23 @@ def fill_mep_bimsf_containers(
                 stats["cleared_bends"] += 1
             continue
 
-        if len(pids) == 0:
-            stats["unassigned"] += 1
-            continue
+        pid = None
+        if len(pids) == 1:
+            pid = list(pids)[0]
+        elif len(pids) == 0 or len(pids) > 1:
+            pid = _resolve_panel_for_element(
+                el, mep_assignments, panel_outlines, pids
+            )
+            if pid:
+                stats["resolved"] += 1
 
-        if len(pids) > 1:
-            if clear_crossings and _clear_container(el):
+        if not pid:
+            if len(pids) > 1 and clear_crossings and _clear_container(el):
                 stats["cleared_crossing"] += 1
+            elif len(pids) == 0:
+                stats["unassigned"] += 1
             continue
 
-        pid = list(pids)[0]
         if not _panel_in_selection(pid, selected):
             continue
 
@@ -765,7 +911,7 @@ def fill_mep_bimsf_containers(
         if had_value and panel_ids_match(had_value, pid):
             continue
 
-        set_panel_labels(el, pid)
+        set_panel_labels(el, pid, known_pids)
         if had_value:
             stats["updated"] += 1
         else:
