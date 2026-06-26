@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 """Keep panel + MEP selected together when clicking in the view.
 
-When sync is ON, clicking a host MEP group, a linked stud, or any
-element with BIMSF_Container auto-expands the selection to the full
-panel + MEP pair (same as Select Panel + MEP).
+Uses UIApplication.Idling (works on all Revit versions — UIDocument
+does not expose SelectionChanged in older releases).
 """
 from System import EventHandler
-from Autodesk.Revit.UI.Events import SelectionChangedEventArgs
+from Autodesk.Revit.UI.Events import IdlingEventArgs
 from pyrevit import DB
 
 import panel_utils as pu
 
-_handler = None
+_uiapp = None
+_idling_handler = None
+_host_doc = None
 _enabled = False
 _syncing = False
 _last_fingerprint = None
@@ -123,13 +124,15 @@ def detect_panel_from_selection(uidoc, host_doc):
     return None
 
 
-def _on_selection_changed(sender, args):
+def _process_selection(uidoc):
     global _syncing, _last_fingerprint
     if _syncing or not _enabled:
         return
 
-    uidoc = sender
     doc = uidoc.Document
+    if _host_doc is not None and doc.Title != _host_doc.Title:
+        return
+
     fp = _selection_fingerprint(uidoc)
     if fp == _last_fingerprint:
         return
@@ -150,29 +153,42 @@ def _on_selection_changed(sender, args):
         _syncing = False
 
 
+def _on_idling(sender, args):
+    if not _enabled:
+        return
+    uidoc = sender.ActiveUIDocument
+    if uidoc is None:
+        return
+    _process_selection(uidoc)
+
+
 def is_enabled():
     return _enabled
 
 
 def enable(uidoc):
-    global _handler, _enabled, _last_fingerprint
-    if _enabled and _handler is not None:
+    global _uiapp, _idling_handler, _host_doc, _enabled, _last_fingerprint
+    if _enabled and _idling_handler is not None:
         return True
-    _handler = EventHandler[SelectionChangedEventArgs](_on_selection_changed)
-    uidoc.SelectionChanged += _handler
+    _host_doc = uidoc.Document
+    _uiapp = uidoc.Application
+    _idling_handler = EventHandler[IdlingEventArgs](_on_idling)
+    _uiapp.Idling += _idling_handler
     _enabled = True
     _last_fingerprint = None
     return True
 
 
 def disable(uidoc):
-    global _handler, _enabled, _last_fingerprint
-    if _handler is not None:
+    global _uiapp, _idling_handler, _host_doc, _enabled, _last_fingerprint
+    if _idling_handler is not None and _uiapp is not None:
         try:
-            uidoc.SelectionChanged -= _handler
+            _uiapp.Idling -= _idling_handler
         except Exception:
             pass
-    _handler = None
+    _idling_handler = None
+    _uiapp = None
+    _host_doc = None
     _enabled = False
     _last_fingerprint = None
 
