@@ -66,17 +66,17 @@ def main():
         except Exception as ex:
             forms.alert("Ungroup failed:\n{}".format(ex), title="UNIQUBE")
             return
-    forms.alert(
-        "Panels are now UNGROUPED.\n\n"
-        "Groups dissolved: {}\n\n"
-        "Select individual studs and pipes. "
-        "Click this button again to regroup panel + MEP.\n\n"
-        "If selection still jumps to framing after a few seconds, "
-        "close and reopen Revit once (clears old auto-select).".format(
-            stats.get("ungrouped", 0)
-        ),
-        title="UNIQUBE — Sync Panel Selection",
-    )
+        forms.alert(
+            "Panels are now UNGROUPED.\n\n"
+            "Groups dissolved: {}\n\n"
+            "Select individual studs and pipes. "
+            "Click this button again to regroup panel + MEP.\n\n"
+            "If selection still jumps to framing after a few seconds, "
+            "close and reopen Revit once (clears old auto-select).".format(
+                stats.get("ungrouped", 0)
+            ),
+            title="UNIQUBE — Sync Panel Selection",
+        )
         return
 
     turn_on = forms.alert(
