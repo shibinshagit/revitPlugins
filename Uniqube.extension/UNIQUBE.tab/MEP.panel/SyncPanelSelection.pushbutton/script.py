@@ -18,11 +18,8 @@ def _link_warning(doc):
         return None
     return (
         "Structural link still loaded:\n  {0}\n\n"
-        "If status bar says 'LINK : Conduits' or 'LINK : Pipes', you are "
-        "clicking the linked model — selection will jump to linked panel "
-        "framing (e.g. 9 studs), not host MEP.\n\n"
-        "Remove the link: Manage Links → Remove\n"
-        "Then select HOST elements only (status bar must NOT say LINK).".format(
+        "Remove the link (Manage Links → Remove) so clicks stay on "
+        "host elements. Status bar must NOT say LINK.".format(
             "\n  ".join(names[:4])
         )
     )
@@ -42,10 +39,7 @@ def main():
         return
 
     try:
-        removed = pss.purge_legacy_idling(uidoc.Application)
-        if removed:
-            logger.debug("purged %s legacy idling handler(s)", removed)
-        pss.ensure_guard(uidoc)
+        pss.purge_legacy_idling(uidoc.Application)
     except Exception as ex:
         logger.debug("idling purge failed: %s", ex)
 
@@ -53,17 +47,12 @@ def main():
         panel_ids = pu.discover_host_panel_ids(doc)
         group_count = pu.count_panel_groups(doc, panel_ids)
     except Exception as ex:
-        logger.debug("panel state check failed: %s", ex)
-        forms.alert(
-            "Could not read panel state:\n{}".format(ex),
-            title="UNIQUBE",
-        )
+        forms.alert("Could not read panel state:\n{}".format(ex), title="UNIQUBE")
         return
 
     if not panel_ids:
         forms.alert(
-            "No host panels found.\n\n"
-            "Run Prepare MEP Panels first.",
+            "No host panels found.\n\nRun Prepare MEP Panels first.",
             title="UNIQUBE — Sync Panel Selection",
         )
         return
@@ -72,19 +61,13 @@ def main():
 
     if group_count > 0:
         prompt = (
-            "Panels are currently GROUPED ({0} group(s)).\n\n"
-            "Each panel (framing + MEP) selects as one Revit group.\n\n"
-            "Ungroup for individual element selection?".format(group_count)
+            "Panels are GROUPED ({0} group(s)).\n\n"
+            "Ungroup so you can select individual studs and pipes?\n\n"
+            "No auto-selection runs when ungrouped.".format(group_count)
         )
         if link_msg:
             prompt = link_msg + "\n\n" + prompt
-        turn_off = forms.alert(
-            prompt,
-            yes=True,
-            no=True,
-            title="UNIQUBE — Sync Panel Selection",
-        )
-        if not turn_off:
+        if not forms.alert(prompt, yes=True, no=True, title="UNIQUBE — Sync Panel Selection"):
             return
         try:
             with revit.Transaction("UNIQUBE: Ungroup Panels"):
@@ -93,11 +76,10 @@ def main():
             forms.alert("Ungroup failed:\n{}".format(ex), title="UNIQUBE")
             return
         msg = (
-            "Panels are now UNGROUPED.\n\n"
+            "Panels are UNGROUPED.\n\n"
             "Groups dissolved: {0}\n"
             "Assemblies disassembled: {1}\n\n"
-            "Select HOST studs and pipes only.\n"
-            "Selection guard is ON.\n\n"
+            "Normal Revit selection only — nothing auto-jumps.\n"
             "Click this button again to regroup.".format(
                 stats.get("ungrouped", 0),
                 stats.get("disassembled", 0),
@@ -108,19 +90,10 @@ def main():
         forms.alert(msg, title="UNIQUBE — Sync Panel Selection")
         return
 
-    prompt = (
-        "Panels are currently UNGROUPED.\n\n"
-        "Regroup panel + MEP back together?"
-    )
+    prompt = "Panels are UNGROUPED.\n\nRegroup panel + MEP together?"
     if link_msg:
         prompt = link_msg + "\n\n" + prompt
-    turn_on = forms.alert(
-        prompt,
-        yes=True,
-        no=True,
-        title="UNIQUBE — Sync Panel Selection",
-    )
-    if not turn_on:
+    if not forms.alert(prompt, yes=True, no=True, title="UNIQUBE — Sync Panel Selection"):
         return
     try:
         with revit.Transaction("UNIQUBE: Regroup Panels"):
@@ -129,11 +102,8 @@ def main():
         forms.alert("Regroup failed:\n{}".format(ex), title="UNIQUBE")
         return
     forms.alert(
-        "Panels are now GROUPED.\n\n"
-        "Host groups created: {}\n\n"
-        "Whole panel + MEP selects together again.".format(
-            stats.get("groups", 0)
-        ),
+        "Panels are GROUPED.\n\n"
+        "Host groups created: {}.".format(stats.get("groups", 0)),
         title="UNIQUBE — Sync Panel Selection",
     )
 

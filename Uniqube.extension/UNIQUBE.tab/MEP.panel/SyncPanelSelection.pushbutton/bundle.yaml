@@ -1,5 +1,6 @@
 title: Sync Panel Selection
 tooltip: >-
-  Toggle panel groups after Prepare MEP Panels. GROUPED = panel + MEP select
-  together. UNGROUPED = individual studs/pipes for editing. Click to switch.
+  Toggle panel groups. GROUPED = panel + MEP select together. UNGROUPED =
+  individual selection with no background auto-select. Remove structural
+  link after Prepare MEP Panels.
 author: Uniqube
