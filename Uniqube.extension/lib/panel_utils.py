@@ -489,6 +489,220 @@ def _view_color_kit(doc):
     return red_settings, panel_settings
 
 
+def _delete_groups_in_doc(doc, selected):
+    """Remove existing panel groups from any document."""
+    for g in DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements():
+        for pid in selected:
+            if group_matches_panel(g.Name, pid):
+                try:
+                    doc.Delete(g.Id)
+                except Exception:
+                    pass
+
+
+def get_link_document_path(host_doc, link_inst):
+    """Return the on-disk path for a Revit link instance."""
+    link_doc = link_inst.GetLinkDocument()
+    if link_doc is not None:
+        try:
+            path = link_doc.PathName
+            if path:
+                return path
+        except Exception:
+            pass
+    try:
+        ref = DB.ExternalFileUtils.GetExternalFileReference(
+            host_doc, link_inst.GetTypeId()
+        )
+        mp = ref.GetPath()
+        return DB.ModelPathUtils.ConvertModelPathToUserVisiblePath(mp)
+    except Exception:
+        return None
+
+
+def _document_path(doc):
+    try:
+        if doc.IsWorkshared:
+            mp = doc.GetWorksharingCentralModelPath()
+            return DB.ModelPathUtils.ConvertModelPathToUserVisiblePath(mp)
+    except Exception:
+        pass
+    try:
+        return doc.PathName
+    except Exception:
+        return None
+
+
+def _open_document_for_edit(app, path, host_doc):
+    """Return (doc, opened_here, close_when_done) for a link file path."""
+    if not path:
+        return None, False, False
+    norm = path.lower()
+    for d in app.Documents:
+        try:
+            dp = _document_path(d)
+            if dp and dp.lower() == norm and not d.IsLinked:
+                return d, False, False
+        except Exception:
+            pass
+    try:
+        mp = DB.ModelPathUtils.ConvertUserVisiblePathToModelPath(path)
+        opts = DB.OpenOptions()
+        opts.Audit = False
+        opened = app.OpenDocumentFile(mp, opts)
+        return opened, True, True
+    except Exception:
+        return None, False, False
+
+
+def group_link_panel_framing(app, host_doc, selected, link_framing):
+    """Create Revit groups for panel framing inside each link .rvt file.
+
+    Revit cannot put linked elements in a host group, so each panel's
+    studs/tracks are grouped in the link model with the same name as the
+    host MEP group (e.g. ELB-1001).
+    """
+    stats = {
+        "link_groups": 0,
+        "link_files": 0,
+        "reloaded": 0,
+        "errors": [],
+    }
+    if not link_framing or not selected:
+        return stats
+
+    by_path = {}
+    for pid in selected:
+        for link_inst, elem in link_framing.get(pid, []):
+            path = get_link_document_path(host_doc, link_inst)
+            if not path:
+                msg = "No file path for link — save the link model locally."
+                if msg not in stats["errors"]:
+                    stats["errors"].append(msg)
+                continue
+            if path not in by_path:
+                by_path[path] = {}
+            by_path[path].setdefault(pid, []).append(elem.UniqueId)
+
+    edited_paths = []
+    for path, panels in by_path.items():
+        edit_doc, opened_here, close_after = _open_document_for_edit(
+            app, path, host_doc
+        )
+        if edit_doc is None:
+            stats["errors"].append("Could not open link file: {}".format(path))
+            continue
+
+        stats["link_files"] += 1
+        t = DB.Transaction(edit_doc, "UNIQUBE: Group Panel Framing")
+        try:
+            t.Start()
+            _delete_groups_in_doc(edit_doc, selected)
+            for pid, unique_ids in panels.items():
+                group_ids = List[DB.ElementId]()
+                for uid in unique_ids:
+                    el = edit_doc.GetElement(uid)
+                    if el is not None:
+                        group_ids.Add(el.Id)
+                if group_ids.Count > 1:
+                    grp = edit_doc.Create.NewGroup(group_ids)
+                    grp.GroupType.Name = panel_group_name(pid)
+                    stats["link_groups"] += 1
+            t.Commit()
+            edited_paths.append(path)
+            if opened_here:
+                edit_doc.Save()
+        except Exception as ex:
+            stats["errors"].append("{}: {}".format(path, ex))
+            if t.HasStarted() and not t.HasEnded():
+                t.RollBack()
+        finally:
+            if close_after and edit_doc is not None:
+                try:
+                    edit_doc.Close(False)
+                except Exception:
+                    pass
+
+    stats["reloaded"] = reload_links_for_paths(host_doc, edited_paths)
+    return stats
+
+
+def reload_links_for_paths(host_doc, paths):
+    """Reload link instances whose source files were edited."""
+    if not paths:
+        return 0
+    norm_paths = set(p.lower() for p in paths)
+    count = 0
+    links = (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.RevitLinkInstance)
+        .ToElements()
+    )
+    for link_inst in links:
+        path = get_link_document_path(host_doc, link_inst)
+        if path and path.lower() in norm_paths:
+            try:
+                link_inst.Reload()
+                count += 1
+            except Exception:
+                pass
+    return count
+
+
+def select_panels_in_view(uidoc, host_doc, selected, link_framing):
+    """Select host MEP groups + linked panel groups together."""
+    refs = List[DB.Reference]()
+    links = (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.RevitLinkInstance)
+        .ToElements()
+    )
+
+    for pid in selected:
+        for g in (
+            DB.FilteredElementCollector(host_doc)
+            .OfClass(DB.Group)
+            .ToElements()
+        ):
+            if not group_matches_panel(g.Name, pid):
+                continue
+            for mid in g.GetMemberIds():
+                el = host_doc.GetElement(mid)
+                if el is not None:
+                    refs.Add(DB.Reference(el))
+
+        link_group_found = False
+        for link_inst in links:
+            link_doc = link_inst.GetLinkDocument()
+            if link_doc is None:
+                continue
+            for g in (
+                DB.FilteredElementCollector(link_doc)
+                .OfClass(DB.Group)
+                .ToElements()
+            ):
+                if not group_matches_panel(g.Name, pid):
+                    continue
+                try:
+                    refs.Add(DB.Reference(g).CreateLinkReference(link_inst))
+                    link_group_found = True
+                except Exception:
+                    pass
+                break
+
+        if not link_group_found:
+            for link_inst, elem in link_framing.get(pid, []):
+                try:
+                    refs.Add(DB.Reference(elem).CreateLinkReference(link_inst))
+                except Exception:
+                    pass
+
+    if refs.Count > 0:
+        uidoc.Selection.SetReferences(refs)
+        return refs.Count
+    return 0
+
+
 def combine_panels_group_color(
     doc,
     view,
@@ -501,8 +715,8 @@ def combine_panels_group_color(
     """Group host panel + MEP and color like Panel Combine (Color).
 
     Host framing and MEP go into Revit groups. Linked panel framing is
-    colored in the active view by BIMSF_Container (cannot be grouped in
-    the host). Crossing MEP is marked red.
+    colored in the active view and should be grouped in the link file via
+    group_link_panel_framing(). Crossing MEP is marked red.
     """
     if link_framing is None:
         link_framing = map_link_framing_by_container(doc)

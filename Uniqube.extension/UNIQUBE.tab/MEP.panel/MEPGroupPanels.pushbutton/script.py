@@ -2,12 +2,9 @@
 """MEP panel grouping with linked framing models (Task 5).
 
 Lists panels from linked/host framing (BIMSF_Container), groups host
-panel framing + MEP per panel, colors linked panel studs/tracks in the
-active view (same method as Panel Combine Color), and tags MEP with
-BIMSF_Container + Panel Name for shop drawings.
-
-Linked framing cannot be placed in a host Revit group — it is colored
-in the view by panel instead.
+MEP + any host framing, creates matching panel groups inside each link
+.rvt file, applies Panel Combine Color highlighting, and selects panel
++ MEP together in the view.
 """
 from pyrevit import revit, DB, forms, script
 from System.Windows.Controls import CheckBox
@@ -16,7 +13,9 @@ from System.Windows import Thickness
 import panel_utils as pu
 
 doc = revit.doc
+uidoc = revit.uidoc
 view = doc.ActiveView
+app = doc.Application
 logger = script.get_logger()
 
 
@@ -47,8 +46,8 @@ class MEPPanelSelector(forms.WPFWindow):
         self.summary_text.Text = (
             "{0} panel(s) found — {1} from linked model(s). "
             "{2} host MEP element(s) cross panel boundaries "
-            "(shown in red; not grouped). Linked panel framing is "
-            "colored in the view (cannot be grouped from host).".format(
+            "(shown in red). Panel framing is grouped inside each "
+            "link file; MEP is grouped in the host.".format(
                 len(rows), link_panels, crossing_count
             )
         )
@@ -93,16 +92,7 @@ def choose_panels(rows, crossing_count):
 
 
 def _delete_existing_groups(selected):
-    all_groups = (
-        DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements()
-    )
-    for g in all_groups:
-        for pid in selected:
-            if pu.group_matches_panel(g.Name, pid):
-                try:
-                    doc.Delete(g.Id)
-                except Exception:
-                    pass
+    pu._delete_groups_in_doc(doc, selected)
 
 
 def _load_catalog(doc):
@@ -115,7 +105,6 @@ def _load_catalog(doc):
         link_framing = result[3]
     else:
         link_framing = pu.map_link_framing_by_container(doc)
-    # Older rows may lack link_framing count — fill in if needed.
     counts = pu.count_link_framing(link_framing)
     for row in rows:
         if "link_framing" not in row:
@@ -128,7 +117,7 @@ def main():
         forms.alert("Open a model view, not a sheet.", title="UNIQUBE")
         return
 
-    if not hasattr(pu, "combine_panels_group_color"):
+    if not hasattr(pu, "group_link_panel_framing"):
         forms.alert(
             "panel_utils.py is out of date on this machine.\n\n"
             "Run git pull on the full revitPlugins folder, then "
@@ -166,25 +155,44 @@ def main():
             tag_mep=True,
         )
 
-    forms.alert(
+    link_stats = pu.group_link_panel_framing(
+        app, doc, selected, link_framing
+    )
+
+    selected_count = 0
+    try:
+        selected_count = pu.select_panels_in_view(
+            uidoc, doc, selected, link_framing
+        )
+    except Exception as ex:
+        logger.debug("Selection failed: %s", ex)
+
+    msg = (
         "Done.\n\n"
         "Panels selected: {}\n"
-        "Revit groups created (host panel + MEP): {}\n"
-        "Host MEP tagged (BIMSF_Container + Panel Name): {}\n"
-        "Host framing in groups: {}\n"
+        "Host groups (MEP + host framing): {}\n"
+        "Link groups (panel framing in .rvt): {}\n"
+        "Link files updated: {}\n"
+        "Links reloaded in host: {}\n"
+        "Host MEP tagged: {}\n"
         "Linked panel framing colored: {}\n"
         "Crossing elements (red): {}\n"
-        "Panels with nothing to group: {}".format(
+        "Elements selected in view: {}".format(
             len(selected),
             stats["groups"],
+            link_stats["link_groups"],
+            link_stats["link_files"],
+            link_stats["reloaded"],
             stats["mep_tagged"],
-            stats["host_framing"],
             stats["link_framing_colored"],
             stats["crossing_count"],
-            stats["skipped_empty"],
-        ),
-        title="UNIQUBE — MEP Group Panels",
+            selected_count,
+        )
     )
+    if link_stats["errors"]:
+        msg += "\n\nNotes:\n" + "\n".join(link_stats["errors"][:5])
+
+    forms.alert(msg, title="UNIQUBE — MEP Group Panels")
 
 
 main()
