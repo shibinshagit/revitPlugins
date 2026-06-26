@@ -38,17 +38,65 @@ def panel_display_name(raw):
 
 
 def panel_group_name(container):
-    """Group type name = BIMSF_Container value only (e.g. *ELB-2001)."""
-    return (container or "").strip()
+    """Group type name — clean panel id (e.g. ELB-1001)."""
+    name = panel_display_name(container)
+    return name or (container or "").strip()
+
+
+def panel_ids_match(a, b):
+    """True if two BIMSF_Container values are the same panel."""
+    if not a or not b:
+        return False
+    return panel_display_name(a).lower() == panel_display_name(b).lower()
+
+
+def merge_framing_for_panel(framing_map, pid):
+    """Collect host framing for a panel (handles * prefix variants)."""
+    elements = []
+    seen = set()
+    for key, items in framing_map.items():
+        if not panel_ids_match(key, pid):
+            continue
+        for el in items:
+            eid = el.Id.IntegerValue
+            if eid not in seen:
+                seen.add(eid)
+                elements.append(el)
+    return elements
+
+
+def merge_link_framing_for_panel(link_framing, pid):
+    """Collect linked framing for a panel (handles * prefix variants)."""
+    pairs = []
+    seen = set()
+    for key, items in link_framing.items():
+        if not panel_ids_match(key, pid):
+            continue
+        for link_inst, elem in items:
+            uid = elem.UniqueId
+            if uid not in seen:
+                seen.add(uid)
+                pairs.append((link_inst, elem))
+    return pairs
+
+
+def _assignment_matches_panel(assigned_pids, pid):
+    if len(assigned_pids) != 1:
+        return False
+    return panel_ids_match(list(assigned_pids)[0], pid)
+
+
+def _assignment_crosses_panel(assigned_pids, pid):
+    if len(assigned_pids) <= 1:
+        return False
+    return any(panel_ids_match(p, pid) for p in assigned_pids)
 
 
 def group_matches_panel(group_name, panel_id):
     """True if a group type name belongs to the given panel id."""
     if not group_name or not panel_id:
         return False
-    g = strip_group_prefix(group_name)
-    p = (panel_id or "").strip()
-    return g == p or panel_display_name(g) == panel_display_name(p)
+    return panel_ids_match(strip_group_prefix(group_name), panel_id)
 
 
 MEP_CATS = [
@@ -533,6 +581,45 @@ def _document_path(doc):
         return None
 
 
+def _link_instances_for_path(host_doc, path):
+    norm = path.lower()
+    result = []
+    links = (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.RevitLinkInstance)
+        .ToElements()
+    )
+    for link_inst in links:
+        lp = get_link_document_path(host_doc, link_inst)
+        if lp and lp.lower() == norm:
+            result.append(link_inst)
+    return result
+
+
+def _unload_link_instances(link_insts):
+    unloaded = []
+    for link_inst in link_insts:
+        try:
+            if link_inst.IsLoaded():
+                link_inst.Unload()
+                unloaded.append(link_inst)
+        except Exception:
+            pass
+    return unloaded
+
+
+def _load_link_instances(link_insts):
+    count = 0
+    for link_inst in link_insts:
+        try:
+            if not link_inst.IsLoaded():
+                link_inst.Load()
+                count += 1
+        except Exception:
+            pass
+    return count
+
+
 def _open_document_for_edit(app, path, host_doc):
     """Return (doc, opened_here, close_when_done) for a link file path."""
     if not path:
@@ -572,8 +659,9 @@ def group_link_panel_framing(app, host_doc, selected, link_framing):
         return stats
 
     by_path = {}
+    link_inst_map = {}
     for pid in selected:
-        for link_inst, elem in link_framing.get(pid, []):
+        for link_inst, elem in merge_link_framing_for_panel(link_framing, pid):
             path = get_link_document_path(host_doc, link_inst)
             if not path:
                 msg = "No file path for link — save the link model locally."
@@ -582,15 +670,21 @@ def group_link_panel_framing(app, host_doc, selected, link_framing):
                 continue
             if path not in by_path:
                 by_path[path] = {}
+                link_inst_map[path] = _link_instances_for_path(host_doc, path)
             by_path[path].setdefault(pid, []).append(elem.UniqueId)
 
-    edited_paths = []
     for path, panels in by_path.items():
+        link_insts = link_inst_map.get(path, [])
+        unloaded = _unload_link_instances(link_insts)
+
         edit_doc, opened_here, close_after = _open_document_for_edit(
             app, path, host_doc
         )
         if edit_doc is None:
-            stats["errors"].append("Could not open link file: {}".format(path))
+            stats["errors"].append(
+                "Could not open link file (unload failed?): {}".format(path)
+            )
+            _load_link_instances(unloaded)
             continue
 
         stats["link_files"] += 1
@@ -600,7 +694,11 @@ def group_link_panel_framing(app, host_doc, selected, link_framing):
             _delete_groups_in_doc(edit_doc, selected)
             for pid, unique_ids in panels.items():
                 group_ids = List[DB.ElementId]()
+                seen_uids = set()
                 for uid in unique_ids:
+                    if uid in seen_uids:
+                        continue
+                    seen_uids.add(uid)
                     el = edit_doc.GetElement(uid)
                     if el is not None:
                         group_ids.Add(el.Id)
@@ -609,7 +707,6 @@ def group_link_panel_framing(app, host_doc, selected, link_framing):
                     grp.GroupType.Name = panel_group_name(pid)
                     stats["link_groups"] += 1
             t.Commit()
-            edited_paths.append(path)
             if opened_here:
                 edit_doc.Save()
         except Exception as ex:
@@ -622,8 +719,9 @@ def group_link_panel_framing(app, host_doc, selected, link_framing):
                     edit_doc.Close(False)
                 except Exception:
                     pass
+            loaded = _load_link_instances(unloaded)
+            stats["reloaded"] += loaded
 
-    stats["reloaded"] = reload_links_for_paths(host_doc, edited_paths)
     return stats
 
 
@@ -650,7 +748,7 @@ def reload_links_for_paths(host_doc, paths):
 
 
 def select_panels_in_view(uidoc, host_doc, selected, link_framing):
-    """Select host MEP groups + linked panel groups together."""
+    """Select host + link Revit group objects for each panel."""
     refs = List[DB.Reference]()
     links = (
         DB.FilteredElementCollector(host_doc)
@@ -666,12 +764,12 @@ def select_panels_in_view(uidoc, host_doc, selected, link_framing):
         ):
             if not group_matches_panel(g.Name, pid):
                 continue
-            for mid in g.GetMemberIds():
-                el = host_doc.GetElement(mid)
-                if el is not None:
-                    refs.Add(DB.Reference(el))
+            try:
+                refs.Add(DB.Reference(g))
+            except Exception:
+                pass
+            break
 
-        link_group_found = False
         for link_inst in links:
             link_doc = link_inst.GetLinkDocument()
             if link_doc is None:
@@ -685,17 +783,9 @@ def select_panels_in_view(uidoc, host_doc, selected, link_framing):
                     continue
                 try:
                     refs.Add(DB.Reference(g).CreateLinkReference(link_inst))
-                    link_group_found = True
                 except Exception:
                     pass
                 break
-
-        if not link_group_found:
-            for link_inst, elem in link_framing.get(pid, []):
-                try:
-                    refs.Add(DB.Reference(elem).CreateLinkReference(link_inst))
-                except Exception:
-                    pass
 
     if refs.Count > 0:
         uidoc.Selection.SetReferences(refs)
@@ -733,21 +823,26 @@ def combine_panels_group_color(
         "link_framing_colored": 0,
         "crossing_count": 0,
         "skipped_empty": 0,
+        "group_errors": [],
         "link_matched": link_stats.get("link_matched", 0),
     }
 
     processed_crossings = set()
+    added_to_group = set()
 
     for pid in selected:
         settings = panel_settings()
         group_ids = List[DB.ElementId]()
 
-        for el in panel_elements.get(pid, []):
+        for el in merge_framing_for_panel(panel_elements, pid):
             view.SetElementOverrides(el.Id, settings)
-            group_ids.Add(el.Id)
-            stats["host_framing"] += 1
+            eid = el.Id.IntegerValue
+            if eid not in added_to_group:
+                added_to_group.add(eid)
+                group_ids.Add(el.Id)
+                stats["host_framing"] += 1
 
-        for link_inst, elem in link_framing.get(pid, []):
+        for link_inst, elem in merge_link_framing_for_panel(link_framing, pid):
             if set_link_element_override(view, link_inst, elem, settings):
                 stats["link_framing_colored"] += 1
 
@@ -755,13 +850,16 @@ def combine_panels_group_color(
             el = doc.GetElement(eid)
             if el is None:
                 continue
-            if len(pids) == 1 and list(pids)[0] == pid:
-                group_ids.Add(eid)
+            eid_int = eid.IntegerValue
+            if _assignment_matches_panel(pids, pid):
+                if eid_int not in added_to_group:
+                    added_to_group.add(eid_int)
+                    group_ids.Add(eid)
                 view.SetElementOverrides(eid, settings)
                 if tag_mep:
                     set_panel_labels(el, pid)
                     stats["mep_tagged"] += 1
-            elif len(pids) > 1 and pid in pids:
+            elif _assignment_crosses_panel(pids, pid):
                 view.SetElementOverrides(eid, red_settings)
                 if eid not in processed_crossings:
                     processed_crossings.add(eid)
@@ -782,20 +880,25 @@ def combine_panels_group_color(
             )
             if is_framing:
                 continue
-            if len(pids) == 1 and list(pids)[0] == pid:
+            if _assignment_matches_panel(pids, pid):
                 set_link_element_override(view, link_inst, elem, settings)
-            elif len(pids) > 1 and pid in pids:
+            elif _assignment_crosses_panel(pids, pid):
                 set_link_element_override(view, link_inst, elem, red_settings)
                 stats["crossing_count"] += 1
 
+        has_link = bool(merge_link_framing_for_panel(link_framing, pid))
         if group_ids.Count > 1:
             try:
                 new_grp = doc.Create.NewGroup(group_ids)
                 new_grp.GroupType.Name = panel_group_name(pid)
                 stats["groups"] += 1
-            except Exception:
-                pass
-        elif group_ids.Count == 0 and not link_framing.get(pid):
+            except Exception as ex:
+                stats["group_errors"].append(
+                    "{}: {}".format(panel_group_name(pid), ex)
+                )
+        elif group_ids.Count == 1 and not has_link:
+            stats["skipped_empty"] += 1
+        elif group_ids.Count == 0 and not has_link:
             stats["skipped_empty"] += 1
 
     return stats
