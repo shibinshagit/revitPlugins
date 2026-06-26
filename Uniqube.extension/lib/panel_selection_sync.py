@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Keep panel + MEP selected together when clicking in the view.
 
-Session state lives in IronPython __main__ (Revit UIApplication cannot hold
-custom Python attributes). One Idling handler per session; enable/disable
-only flips a flag so OFF immediately stops auto-selection.
+Uses a global ON/OFF flag in IronPython __main__ plus a single Idling handler.
+select_panel_pair() also checks the flag so old orphaned handlers cannot
+expand selection after sync is turned OFF.
 """
 import __main__
 
@@ -13,20 +13,16 @@ from pyrevit import DB
 
 import panel_utils as pu
 
+_ACTIVE_KEY = "_uniqube_panel_sync_active"
 _SESSIONS_KEY = "_uniqube_panel_sync_sessions"
-_HANDLERS_KEY = "_uniqube_panel_sync_idling_handlers"
+_HANDLER_KEY = "_uniqube_panel_sync_handler"
+_UIAPP_ID_KEY = "_uniqube_panel_sync_uiapp_id"
 
 
 def _sessions():
     if not hasattr(__main__, _SESSIONS_KEY):
         setattr(__main__, _SESSIONS_KEY, {})
     return getattr(__main__, _SESSIONS_KEY)
-
-
-def _handlers():
-    if not hasattr(__main__, _HANDLERS_KEY):
-        setattr(__main__, _HANDLERS_KEY, {})
-    return getattr(__main__, _HANDLERS_KEY)
 
 
 def _uiapp_key(uiapp):
@@ -38,12 +34,15 @@ def _state(uiapp):
     key = _uiapp_key(uiapp)
     if key not in sessions:
         sessions[key] = {
-            "enabled": False,
             "host_doc_title": None,
             "syncing": False,
             "last_fingerprint": None,
         }
     return sessions[key]
+
+
+def _set_active(value):
+    setattr(__main__, _ACTIVE_KEY, bool(value))
 
 
 def _selection_fingerprint(uidoc):
@@ -153,6 +152,8 @@ def detect_panel_from_selection(uidoc, host_doc):
 
 
 def _process_selection(uidoc, st):
+    if not is_enabled(uidoc):
+        return
     if st.get("syncing"):
         return
     doc = uidoc.Document
@@ -180,65 +181,70 @@ def _process_selection(uidoc, st):
         st["syncing"] = False
 
 
-def _ensure_idling_handler(uiapp):
-    """Attach exactly one Idling handler per UIApplication per Revit session."""
-    handlers = _handlers()
-    key = _uiapp_key(uiapp)
-    if key in handlers:
+def _on_idling(sender, args):
+    if not getattr(__main__, _ACTIVE_KEY, False):
         return
+    uidoc = sender.ActiveUIDocument
+    if uidoc is None:
+        return
+    st = _state(sender)
+    _process_selection(uidoc, st)
 
-    st = _state(uiapp)
 
-    def _on_idling(sender, args):
-        if not st.get("enabled"):
-            return
-        uidoc = sender.ActiveUIDocument
-        if uidoc is None:
-            return
-        _process_selection(uidoc, st)
+def _detach_handler(uiapp):
+    handler = getattr(__main__, _HANDLER_KEY, None)
+    if handler is not None:
+        try:
+            uiapp.Idling -= handler
+        except Exception:
+            pass
+    setattr(__main__, _HANDLER_KEY, None)
+    setattr(__main__, _UIAPP_ID_KEY, None)
 
+
+def _attach_handler(uiapp):
+    current_id = getattr(__main__, _UIAPP_ID_KEY, None)
+    if (
+        getattr(__main__, _HANDLER_KEY, None) is not None
+        and current_id == _uiapp_key(uiapp)
+    ):
+        return
+    _detach_handler(uiapp)
     handler = EventHandler[IdlingEventArgs](_on_idling)
     uiapp.Idling += handler
-    handlers[key] = handler
+    setattr(__main__, _HANDLER_KEY, handler)
+    setattr(__main__, _UIAPP_ID_KEY, _uiapp_key(uiapp))
 
 
 def is_enabled(uidoc):
     """True when panel selection sync is active for this Revit session."""
-    if uidoc is None:
-        return False
-    try:
-        uiapp = uidoc.Application
-        key = _uiapp_key(uiapp)
-        sessions = _sessions()
-        if key not in sessions:
-            return False
-        return bool(sessions[key].get("enabled"))
-    except Exception:
-        return False
+    return bool(getattr(__main__, _ACTIVE_KEY, False))
 
 
 def enable(uidoc):
     """Turn panel selection sync ON."""
     uiapp = uidoc.Application
-    _ensure_idling_handler(uiapp)
     st = _state(uiapp)
-    st["enabled"] = True
     st["host_doc_title"] = uidoc.Document.Title
     st["last_fingerprint"] = None
     st["syncing"] = False
+    _attach_handler(uiapp)
+    _set_active(True)
     return True
 
 
 def disable(uidoc):
-    """Turn panel selection sync OFF (handler stays; flag stops selection)."""
+    """Turn panel selection sync OFF and detach the Idling handler."""
     if uidoc is None:
+        _set_active(False)
         return False
     uiapp = uidoc.Application
     st = _state(uiapp)
-    st["enabled"] = False
     st["syncing"] = False
     st["last_fingerprint"] = None
     st["host_doc_title"] = None
+    _set_active(False)
+    _detach_handler(uiapp)
     return False
 
 

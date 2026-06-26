@@ -805,6 +805,13 @@ def reload_links_for_paths(host_doc, paths):
 
 def select_panel_pair(uidoc, host_doc, pid, link_framing):
     """Select ONE panel's host group; include link only if framing is still linked."""
+    try:
+        import panel_selection_sync as pss
+        if not pss.is_enabled(uidoc):
+            return 0
+    except Exception:
+        pass
+
     refs = List[DB.Reference]()
     host_framing = map_framing(host_doc)
     host_only = bool(merge_framing_for_panel(host_framing, pid))
