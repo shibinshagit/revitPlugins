@@ -5,6 +5,7 @@ from System.Collections.Generic import List
 
 
 PARAM_NAME = "BIMSF_Container"
+PANEL_NAME_PARAM = "Panel Name"
 
 # Legacy group type prefixes (ours and MWF) — panel name only in UI.
 _GROUP_PREFIXES = (
@@ -208,6 +209,99 @@ def _set_container(elem, pid):
         except Exception:
             return False
     return False
+
+
+def set_panel_labels(elem, panel_id):
+    """Write BIMSF_Container and Panel Name on a host element."""
+    display = panel_display_name(panel_id)
+    _set_container(elem, panel_id)
+    p = elem.LookupParameter(PANEL_NAME_PARAM)
+    if p and not p.IsReadOnly:
+        try:
+            p.Set(display)
+        except Exception:
+            pass
+
+
+def map_framing_link_sources(doc):
+    """Return {panel_id: link_doc_title} from linked structural framing."""
+    sources = {}
+    links = (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.RevitLinkInstance)
+        .ToElements()
+    )
+    for link_inst in links:
+        link_doc = link_inst.GetLinkDocument()
+        if link_doc is None:
+            continue
+        link_title = link_doc.Title or "linked model"
+        framing = (
+            DB.FilteredElementCollector(link_doc)
+            .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
+            .WhereElementIsNotElementType()
+            .ToElements()
+        )
+        for beam in framing:
+            p_param = beam.LookupParameter(PARAM_NAME)
+            if p_param and p_param.HasValue:
+                pid = p_param.AsString()
+                if pid:
+                    sources.setdefault(pid, link_title)
+    return sources
+
+
+def preview_mep_counts(doc, panel_elements, link_zones):
+    """Return {panel_id: host_mep_count} for elements in exactly one panel."""
+    mep_assignments, _, _ = assign_mep_to_panels(
+        doc, panel_elements, link_zones
+    )
+    counts = {pid: 0 for pid in get_all_panel_ids(panel_elements, link_zones)}
+    for _eid, pids in mep_assignments.items():
+        if len(pids) == 1:
+            pid = list(pids)[0]
+            counts[pid] = counts.get(pid, 0) + 1
+    return counts
+
+
+def preview_crossing_mep(doc, panel_elements, link_zones):
+    """Return count of host MEP elements assigned to more than one panel."""
+    mep_assignments, _, _ = assign_mep_to_panels(
+        doc, panel_elements, link_zones
+    )
+    return sum(1 for pids in mep_assignments.values() if len(pids) > 1)
+
+
+def build_panel_catalog(doc):
+    """Build panel rows for the MEP grouping UI.
+
+    Each row: pid, display, source, mep_count, link_name, host_framing.
+    """
+    panel_elements = map_framing(doc)
+    link_zones = map_framing_from_links(doc)
+    link_sources = map_framing_link_sources(doc)
+    mep_counts = preview_mep_counts(doc, panel_elements, link_zones)
+    all_pids = get_all_panel_ids(panel_elements, link_zones)
+
+    rows = []
+    for pid in sorted(all_pids, key=lambda x: panel_display_name(x).lower()):
+        host_count = len(panel_elements.get(pid, []))
+        in_link = pid in link_zones
+        if host_count and in_link:
+            source = "host + link"
+        elif in_link:
+            source = "link"
+        else:
+            source = "host"
+        rows.append({
+            "pid": pid,
+            "display": panel_display_name(pid),
+            "source": source,
+            "mep_count": mep_counts.get(pid, 0),
+            "link_name": link_sources.get(pid, ""),
+            "host_framing": host_count,
+        })
+    return rows, panel_elements, link_zones
 
 
 def _host_bbox_in_outline(elem, outline):

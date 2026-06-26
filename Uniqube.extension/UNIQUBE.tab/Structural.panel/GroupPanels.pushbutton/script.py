@@ -56,9 +56,7 @@ def main():
                 if len(pids) == 1 and list(pids)[0] == pid:
                     el = doc.GetElement(eid)
                     group_ids.Add(eid)
-                    p_param = el.LookupParameter(pu.PARAM_NAME)
-                    if p_param and not p_param.IsReadOnly:
-                        p_param.Set(pid)
+                    pu.set_panel_labels(el, pid)
 
             if group_ids.Count > 1:
                 try:
