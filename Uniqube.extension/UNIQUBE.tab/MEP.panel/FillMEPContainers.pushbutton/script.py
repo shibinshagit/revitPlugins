@@ -26,8 +26,8 @@ class TagPanelSelector(forms.WPFWindow):
         self.selected = None
         self.summary_text.Text = (
             "{0} panel(s). {1} crossing MEP (will be cleared). "
-            "Fills BIMSF_Container on pipes, conduits, fittings, "
-            "fixtures, and other MEP inside each panel zone.".format(
+            "Fills BIMSF_Container on MEP in each panel zone; items "
+            "outside zones inherit from connected pipes/conduits.".format(
                 len(rows), crossing_count
             )
         )
@@ -96,12 +96,14 @@ def main():
     forms.alert(
         "Done.\n\n"
         "BIMSF_Container filled: {tagged} new, {updated} updated\n"
+        "Via connected runs: {prop}\n"
         "Crossing cleared: {cross}\n"
         "Conduit bends cleared: {bends}\n"
         "No writable param: {skip}\n"
-        "Outside panel zones: {unassigned}".format(
+        "Still unassigned: {unassigned}".format(
             tagged=stats.get("tagged", 0),
             updated=stats.get("updated", 0),
+            prop=stats.get("propagated", 0),
             cross=stats.get("cleared_crossing", 0),
             bends=stats.get("cleared_bends", 0),
             skip=stats.get("skipped_no_param", 0),

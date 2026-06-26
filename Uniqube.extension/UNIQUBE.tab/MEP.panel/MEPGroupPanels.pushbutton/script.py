@@ -215,15 +215,16 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     msg = (
         "Done.\n\n"
         "1. BIMSF_Container filled: {0} new, {1} updated\n"
-        "2. Crossing cleared: {2} | Conduit bends cleared: {3}\n"
-        "3. MEP groups: {4}\n"
-        "4. Crossing MEP (red): {5}\n"
-        "5. Panels copied to host: {6}\n"
-        "6. Framing members copied: {7}\n"
-        "7. Final host groups (panel + MEP): {8}\n"
-        "8. Selection sync: {9}".format(
+        "2. Via connected runs: {2} | Crossing cleared: {3} | Bends cleared: {4}\n"
+        "3. MEP groups: {5}\n"
+        "4. Crossing MEP (red): {6}\n"
+        "5. Panels copied to host: {7}\n"
+        "6. Framing members copied: {8}\n"
+        "7. Final host groups (panel + MEP): {9}\n"
+        "8. Selection sync: {10}".format(
             tag_stats.get("tagged", 0),
             tag_stats.get("updated", 0),
+            tag_stats.get("propagated", 0),
             tag_stats.get("cleared_crossing", 0),
             tag_stats.get("cleared_bends", 0),
             group_stats.get("groups", 0),

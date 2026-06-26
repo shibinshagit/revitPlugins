@@ -329,6 +329,137 @@ def _panel_in_selection(pid, selected):
     return any(panel_ids_match(pid, s) for s in selected)
 
 
+def _read_container_value(elem):
+    p = elem.LookupParameter(PARAM_NAME)
+    if p and p.HasValue:
+        val = p.AsString()
+        if val and val.strip():
+            return val.strip()
+    return None
+
+
+def _get_mep_connector_manager(elem):
+    """Return ConnectorManager for MEPCurve, fittings, or equipment."""
+    try:
+        if isinstance(elem, DB.MEPCurve):
+            return elem.ConnectorManager
+    except Exception:
+        pass
+    try:
+        mep_model = elem.MEPModel
+        if mep_model is not None:
+            return mep_model.ConnectorManager
+    except Exception:
+        pass
+    try:
+        return elem.ConnectorManager
+    except Exception:
+        pass
+    return None
+
+
+def _mep_network_neighbors(elem, valid_ids):
+    """Return connected host MEP elements via physical connectors."""
+    result = []
+    seen = set()
+    cm = _get_mep_connector_manager(elem)
+    if cm is None:
+        return result
+    try:
+        connectors = cm.Connectors
+    except Exception:
+        return result
+    if connectors is None:
+        return result
+    for conn in connectors:
+        try:
+            refs = conn.AllRefs
+        except Exception:
+            continue
+        if refs is None:
+            continue
+        for ref in refs:
+            if ref is None:
+                continue
+            try:
+                owner = ref.Owner
+            except Exception:
+                continue
+            if owner is None or owner.Id == elem.Id:
+                continue
+            key = owner.Id.IntegerValue
+            if key not in valid_ids or key in seen:
+                continue
+            seen.add(key)
+            result.append(owner)
+    return result
+
+
+def _seed_assignments_from_parameters(doc, host_assignments, known_pids):
+    """Use existing BIMSF_Container on elements as propagation seeds."""
+    seeded = 0
+    for eid, pids in host_assignments.items():
+        if pids:
+            continue
+        el = doc.GetElement(eid)
+        if el is None:
+            continue
+        existing = _read_container_value(el)
+        if not existing:
+            continue
+        for kp in known_pids:
+            if panel_ids_match(existing, kp):
+                host_assignments[eid] = set([kp])
+                seeded += 1
+                break
+    return seeded
+
+
+def propagate_panel_assignments(doc, host_assignments, max_passes=100):
+    """Extend panel assignment along connected MEP runs.
+
+    Unassigned elements (0 panels) or ambiguous bbox hits (2+ panels) inherit
+    the panel when all resolved connected neighbors share one panel id.
+    """
+    valid_ids = set(eid.IntegerValue for eid in host_assignments.keys())
+    element_cache = {}
+    propagated = 0
+
+    def get_elem(eid):
+        key = eid.IntegerValue
+        if key not in element_cache:
+            element_cache[key] = doc.GetElement(eid)
+        return element_cache[key]
+
+    def neighbor_panels(eid):
+        el = get_elem(eid)
+        if el is None:
+            return set()
+        panels = set()
+        for nb in _mep_network_neighbors(el, valid_ids):
+            nb_pids = host_assignments.get(nb.Id, set())
+            if len(nb_pids) == 1:
+                panels.add(list(nb_pids)[0])
+        return panels
+
+    for _ in range(max_passes):
+        changed = False
+        for eid, pids in list(host_assignments.items()):
+            if len(pids) == 1:
+                continue
+            conn_panels = neighbor_panels(eid)
+            if len(conn_panels) != 1:
+                continue
+            pid = list(conn_panels)[0]
+            if pids != set([pid]):
+                host_assignments[eid] = set([pid])
+                propagated += 1
+                changed = True
+        if not changed:
+            break
+    return propagated
+
+
 def _append_bimsf_param_assignments(doc, panel_outlines, host_assignments):
     """Assign any host element with BIMSF_Container inside a panel zone."""
     for pid, outline in panel_outlines.items():
@@ -566,6 +697,10 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
                 link_assignments.append((link_inst, elem, matched))
                 stats["link_matched"] += 1
 
+    known_pids = list(all_pids)
+    _seed_assignments_from_parameters(doc, host_assignments, known_pids)
+    stats["propagated"] = propagate_panel_assignments(doc, host_assignments)
+
     return host_assignments, link_assignments, stats
 
 
@@ -581,7 +716,8 @@ def fill_mep_bimsf_containers(
 
     Pipes, conduits, fittings, fixtures, and any other host element that has
     a writable BIMSF_Container parameter inside the panel bounding box are
-    tagged automatically. Crossing elements (two+ panels) are cleared.
+    tagged automatically. Unassigned items inherit the panel from connected
+    runs (pipes/conduits/fittings). Crossing elements (two+ panels) are cleared.
     """
     stats = {
         "tagged": 0,
@@ -590,10 +726,12 @@ def fill_mep_bimsf_containers(
         "cleared_bends": 0,
         "skipped_no_param": 0,
         "unassigned": 0,
+        "propagated": 0,
     }
-    mep_assignments, _, _ = assign_mep_to_panels(
+    mep_assignments, _, assign_stats = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
+    stats["propagated"] = assign_stats.get("propagated", 0)
 
     for eid, pids in mep_assignments.items():
         el = doc.GetElement(eid)
