@@ -1,0 +1,5 @@
+title: Sync Panel Selection
+tooltip: >-
+  Toggle ON: clicking any panel or MEP element in the view automatically
+  selects the matching panel framing + MEP together.
+author: Uniqube

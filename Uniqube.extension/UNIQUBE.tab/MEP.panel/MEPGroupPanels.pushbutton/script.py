@@ -239,7 +239,17 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
             "directly (not as link), run this same button there to "
             "group panel framing, then return to the MEP model."
         )
+    msg += (
+        "\n\nPanel selection sync is now ON — clicking panel or MEP "
+        "in the view selects both together. Turn off via Sync Panel Selection."
+    )
     forms.alert(msg, title="UNIQUBE — MEP Group Panels")
+
+    try:
+        import panel_selection_sync as pss
+        pss.enable(uidoc)
+    except Exception:
+        pass
 
     _offer_select_one(selected, link_framing)
 
