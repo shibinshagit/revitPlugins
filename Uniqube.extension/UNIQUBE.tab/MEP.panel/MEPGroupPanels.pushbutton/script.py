@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
-"""MEP panel grouping with linked framing models (Task 5).
+"""One-step MEP panel prep: group, copy framing to host, enable sync (Task 5).
 
-Host MEP model: groups MEP + colors panels, edits link .rvt for panel groups.
+Host MEP model: groups MEP, copies linked panel framing into host, regroups
+panel + MEP together, turns on click-to-select sync.
+
 Framing link model (open .rvt directly): groups panel framing only.
 """
 from pyrevit import revit, DB, forms, script
@@ -22,9 +24,9 @@ def _row_label(row):
     if row.get("mep_count"):
         parts.append("[ MEP: {} ]".format(row["mep_count"]))
     if row.get("link_framing"):
-        parts.append("[ panel: {} ]".format(row["link_framing"]))
-    elif row.get("host_framing"):
-        parts.append("[ panel: {} ]".format(row["host_framing"]))
+        parts.append("[ link: {} ]".format(row["link_framing"]))
+    if row.get("host_framing"):
+        parts.append("[ host: {} ]".format(row["host_framing"]))
     if row.get("source") == "link" and row.get("link_name"):
         parts.append("(link: {})".format(row["link_name"]))
     return "  ".join(parts)
@@ -39,7 +41,8 @@ class MEPPanelSelector(forms.WPFWindow):
         if mode_host:
             self.summary_text.Text = (
                 "{0} panel(s). {1} crossing MEP (red). "
-                "Groups MEP in this model + panel framing in the link .rvt.".format(
+                "Groups MEP, copies panel framing from link into this model, "
+                "regroups panel + MEP, and turns on selection sync.".format(
                     len(rows), crossing_count
                 )
             )
@@ -86,49 +89,6 @@ def choose_panels(rows, crossing_count, mode_host=True):
         return pu.choose_panels([r["pid"] for r in rows])
 
 
-def _build_catalog(doc):
-    panel_elements = pu.map_framing(doc)
-    link_zones = pu.map_framing_from_links(doc)
-    link_framing = pu.map_link_framing_by_container(doc)
-    link_sources = pu.map_framing_link_sources(doc)
-    mep_counts = pu.preview_mep_counts(doc, panel_elements, link_zones)
-    link_counts = pu.count_link_framing(link_framing)
-
-    all_pids = pu.get_all_panel_ids(panel_elements, link_zones)
-    all_pids.update(link_framing.keys())
-    all_pids.update(panel_elements.keys())
-
-    rows = []
-    for pid in sorted(all_pids, key=lambda x: pu.panel_display_name(x).lower()):
-        host_count = len(pu.merge_framing_for_panel(panel_elements, pid))
-        link_count = sum(
-            link_counts.get(k, 0)
-            for k in link_counts
-            if pu.panel_ids_match(k, pid)
-        )
-        in_link = pid in link_zones or link_count > 0
-        if host_count and in_link:
-            source = "host + link"
-        elif in_link:
-            source = "link"
-        else:
-            source = "host"
-        rows.append({
-            "pid": pid,
-            "display": pu.panel_display_name(pid),
-            "source": source,
-            "mep_count": sum(
-                mep_counts.get(k, 0)
-                for k in mep_counts
-                if pu.panel_ids_match(k, pid)
-            ),
-            "link_name": link_sources.get(pid, ""),
-            "host_framing": host_count,
-            "link_framing": link_count,
-        })
-    return rows, panel_elements, link_zones, link_framing
-
-
 def _is_framing_primary_doc(doc):
     """True when this IS the framing link file opened directly."""
     if doc.IsLinked:
@@ -143,29 +103,6 @@ def _is_framing_primary_doc(doc):
     return bool(pu.map_framing(doc))
 
 
-def _offer_select_one(selected, link_framing):
-    """Let user pick ONE panel — selects its MEP group + panel framing together."""
-    if not selected or len(selected) < 1:
-        return 0
-    display_map = {pu.panel_display_name(p): p for p in selected}
-    options = sorted(display_map.keys())
-    pick = forms.SelectFromList.show(
-        options,
-        title="UNIQUBE — Select one panel (MEP + panel together)",
-        button_name="Select",
-    )
-    if not pick:
-        return 0
-    pid = display_map.get(pick)
-    if not pid:
-        return 0
-    try:
-        return pu.select_panel_pair(uidoc, doc, pid, link_framing)
-    except Exception as ex:
-        logger.debug("select_panel_pair failed: %s", ex)
-        return 0
-
-
 def _run_framing_doc(selected):
     stats = {"link_groups": 0, "errors": []}
     with revit.Transaction("UNIQUBE: Group Panel Framing"):
@@ -174,29 +111,74 @@ def _run_framing_doc(selected):
     msg = (
         "Done (framing model).\n\n"
         "Panel groups created: {}\n\n"
-        "Next: open the MEP host model and run this button "
-        "there to group MEP for the same panels.".format(
+        "Next: open the MEP host model and run Prepare MEP Panels "
+        "there for the same panels.".format(
             stats.get("link_groups", 0)
         )
     )
     if stats.get("errors"):
         msg += "\n\nIssues:\n" + "\n".join(stats["errors"][:5])
-    forms.alert(msg, title="UNIQUBE — MEP Group Panels")
+    forms.alert(msg, title="UNIQUBE — Prepare MEP Panels")
     return stats
 
 
-def _run_host_doc(selected, panel_elements, link_zones, link_framing):
-    stats = {}
-    link_stats = {"link_groups": 0, "link_files": 0, "reloaded": 0, "errors": []}
+def _run_copy_to_host(selected, link_framing):
+    """Copy linked framing into host and regroup — returns copy stats dict."""
+    copy_stats = {
+        "panels": 0,
+        "members_copied": 0,
+        "groups_exploded": 0,
+        "host_groups": 0,
+        "skipped": [],
+        "errors": [],
+        "copied_pids": [],
+    }
+    if not link_framing:
+        copy_stats["skipped"].append("(no structural link loaded)")
+        return copy_stats
 
+    if not hasattr(pu, "copy_panel_framing_to_host"):
+        copy_stats["errors"].append("panel_utils.py out of date — git pull")
+        return copy_stats
+
+    try:
+        with revit.Transaction("UNIQUBE: Copy Panel to Host"):
+            copy_stats = pu.copy_panel_framing_to_host(
+                doc, view, selected, link_framing, regroup=False
+            )
+    except Exception as ex:
+        copy_stats["errors"].append("Copy: {}".format(ex))
+        return copy_stats
+
+    copied_pids = copy_stats.get("copied_pids", [])
+    if copy_stats.get("panels", 0) > 0 and copied_pids:
+        try:
+            with revit.Transaction("UNIQUBE: Regroup Panel + MEP"):
+                regroup = pu.regroup_panels_in_host(
+                    doc, view, copied_pids, tag_mep=True
+                )
+                copy_stats["host_groups"] = regroup.get("groups", 0)
+                copy_stats.setdefault("errors", []).extend(
+                    regroup.get("group_errors", [])
+                )
+        except Exception as ex:
+            copy_stats.setdefault("errors", []).append("Regroup: {}".format(ex))
+
+    if hasattr(pu, "verify_panel_copy"):
+        copy_stats["verify"] = pu.verify_panel_copy(doc, selected)
+    return copy_stats
+
+
+def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     if isinstance(view, DB.ViewSheet):
         forms.alert("Open a model view, not a sheet.", title="UNIQUBE")
         return
 
+    group_stats = {}
     try:
-        with revit.Transaction("UNIQUBE: MEP Group Panels"):
+        with revit.Transaction("UNIQUBE: Group MEP + Panels"):
             pu._delete_groups_in_doc(doc, selected)
-            stats = pu.combine_panels_group_color(
+            group_stats = pu.combine_panels_group_color(
                 doc,
                 view,
                 selected,
@@ -206,52 +188,72 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
                 tag_mep=True,
             )
     except Exception as ex:
-        forms.alert("Host grouping failed:\n{}".format(ex), title="UNIQUBE")
+        forms.alert("Grouping failed:\n{}".format(ex), title="UNIQUBE")
         return
 
+    link_framing = pu.map_link_framing_by_container(doc)
+    copy_stats = _run_copy_to_host(selected, link_framing)
+
+    sync_on = False
     try:
-        link_stats = pu.group_link_panel_framing(
-            app, doc, selected, link_framing
-        )
+        import panel_selection_sync as pss
+        sync_on = pss.enable(uidoc)
     except Exception as ex:
-        link_stats["errors"].append("Link grouping: {}".format(ex))
+        logger.debug("sync enable failed: %s", ex)
 
     msg = (
         "Done.\n\n"
-        "Host MEP groups: {}\n"
-        "Link panel groups: {}\n"
-        "Link files edited: {}\n"
-        "Links reloaded: {}\n"
-        "Crossing MEP (red): {}".format(
-            stats.get("groups", 0),
-            link_stats.get("link_groups", 0),
-            link_stats.get("link_files", 0),
-            link_stats.get("reloaded", 0),
-            stats.get("crossing_count", 0),
+        "1. MEP groups: {0}\n"
+        "2. Crossing MEP (red): {1}\n"
+        "3. Panels copied to host: {2}\n"
+        "4. Framing members copied: {3}\n"
+        "5. Final host groups (panel + MEP): {4}\n"
+        "6. Selection sync: {5}".format(
+            group_stats.get("groups", 0),
+            group_stats.get("crossing_count", 0),
+            copy_stats.get("panels", 0),
+            copy_stats.get("members_copied", 0),
+            copy_stats.get("host_groups", 0)
+            or group_stats.get("groups", 0),
+            "ON" if sync_on else "OFF",
         )
     )
-    errors = stats.get("group_errors", []) + link_stats.get("errors", [])
+
+    verify = copy_stats.get("verify", [])
+    if verify:
+        msg += "\n\nVerify:"
+        for row in verify[:10]:
+            msg += "\n  {0} — {1} (host: {2}, link: {3})".format(
+                row["panel"],
+                row["status"],
+                row["host_framing"],
+                row["link_framing"],
+            )
+
+    skipped = copy_stats.get("skipped", [])
+    if skipped:
+        msg += "\n\nCopy skipped:\n" + "\n".join(skipped[:6])
+
+    errors = (
+        group_stats.get("group_errors", [])
+        + copy_stats.get("errors", [])
+    )
     if errors:
-        msg += "\n\nIssues:\n" + "\n".join(errors[:6])
-    if link_stats.get("link_groups", 0) == 0 and link_framing:
+        msg += "\n\nIssues:\n" + "\n".join(errors[:8])
+
+    if copy_stats.get("panels", 0) > 0:
         msg += (
-            "\n\nIf link groups = 0: open Willow Street_Framing.rvt "
-            "directly (not as link), run this same button there to "
-            "group panel framing, then return to the MEP model."
+            "\n\nPanel framing is in the host model. "
+            "Remove the structural link (Manage Links → Remove) "
+            "when all panels show OK in Verify."
         )
-    msg += (
-        "\n\nPanel selection sync is now ON — clicking panel or MEP "
-        "in the view selects both together. Turn off via Sync Panel Selection."
-    )
-    forms.alert(msg, title="UNIQUBE — MEP Group Panels")
+    elif link_framing:
+        msg += (
+            "\n\nClick any panel or MEP in the view — sync selects "
+            "the full panel + MEP pair automatically."
+        )
 
-    try:
-        import panel_selection_sync as pss
-        pss.enable(uidoc)
-    except Exception:
-        pass
-
-    _offer_select_one(selected, link_framing)
+    forms.alert(msg, title="UNIQUBE — Prepare MEP Panels")
 
 
 def main():
@@ -263,7 +265,7 @@ def main():
         )
         return
 
-    rows, panel_elements, link_zones, link_framing = _build_catalog(doc)
+    rows, panel_elements, link_zones, link_framing = pu.build_panel_rows(doc)
     if not rows:
         forms.alert(
             "No panels with '{}' found.".format(pu.PARAM_NAME),
