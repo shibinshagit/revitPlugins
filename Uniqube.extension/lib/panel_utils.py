@@ -1059,12 +1059,6 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing, regroup=T
         return stats
 
     copy_opts = DB.CopyPasteOptions()
-
-    class _UseSourceTypes(DB.IDuplicateTypeNamesHandler):
-        def OnDuplicateTypeNamesFound(self, args):
-            return DB.DuplicateTypeAction.UseSourceTypes
-
-    copy_opts.SetDuplicateTypeNamesHandler(_UseSourceTypes())
     host_framing = map_framing(host_doc)
     copied_pids = []
 
