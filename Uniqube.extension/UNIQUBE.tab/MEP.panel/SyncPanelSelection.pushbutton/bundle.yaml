@@ -1,6 +1,6 @@
 title: Sync Panel Selection
 tooltip: >-
-  Toggle panel groups. GROUPED = panel + MEP select together. UNGROUPED =
-  individual selection with no background auto-select. Remove structural
-  link after Prepare MEP Panels.
+  Toggle click-to-select sync ON/OFF. When ON, clicking a panel stud, host
+  group, or MEP element auto-selects the full panel + MEP pair. Prepare MEP
+  Panels turns sync ON automatically.
 author: Uniqube

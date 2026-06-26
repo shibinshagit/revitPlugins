@@ -41,8 +41,9 @@ class MEPPanelSelector(forms.WPFWindow):
         if mode_host:
             self.summary_text.Text = (
                 "{0} panel(s). {1} crossing MEP (red). "
-                "Groups MEP, copies panel framing from link into this model, "
-                "regroups panel + MEP, and turns on selection sync.".format(
+                "Auto-fills BIMSF_Container, groups MEP, copies panel framing "
+                "from link into this model, regroups panel + MEP, "
+                "and turns on selection sync.".format(
                     len(rows), crossing_count
                 )
             )
@@ -174,6 +175,16 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         forms.alert("Open a model view, not a sheet.", title="UNIQUBE")
         return
 
+    tag_stats = {}
+    try:
+        with revit.Transaction("UNIQUBE: Fill BIMSF_Container"):
+            tag_stats = pu.fill_mep_bimsf_containers(
+                doc, panel_elements, link_zones, selected=selected
+            )
+    except Exception as ex:
+        forms.alert("Auto-fill BIMSF_Container failed:\n{}".format(ex), title="UNIQUBE")
+        return
+
     group_stats = {}
     try:
         with revit.Transaction("UNIQUBE: Group MEP + Panels"):
@@ -194,27 +205,34 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     link_framing = pu.map_link_framing_by_container(doc)
     copy_stats = _run_copy_to_host(selected, link_framing)
 
+    sync_on = False
     try:
         import panel_selection_sync as pss
-        pss.mark_grouped()
-        pss.purge_legacy_idling(uidoc.Application)
+        sync_on = pss.enable(uidoc)
     except Exception as ex:
-        logger.debug("panel mode setup failed: %s", ex)
+        logger.debug("sync enable failed: %s", ex)
 
     msg = (
         "Done.\n\n"
-        "1. MEP groups: {0}\n"
-        "2. Crossing MEP (red): {1}\n"
-        "3. Panels copied to host: {2}\n"
-        "4. Framing members copied: {3}\n"
-        "5. Final host groups (panel + MEP): {4}\n"
-        "6. Panel mode: GROUPED".format(
+        "1. BIMSF_Container filled: {0} new, {1} updated\n"
+        "2. Crossing cleared: {2} | Conduit bends cleared: {3}\n"
+        "3. MEP groups: {4}\n"
+        "4. Crossing MEP (red): {5}\n"
+        "5. Panels copied to host: {6}\n"
+        "6. Framing members copied: {7}\n"
+        "7. Final host groups (panel + MEP): {8}\n"
+        "8. Selection sync: {9}".format(
+            tag_stats.get("tagged", 0),
+            tag_stats.get("updated", 0),
+            tag_stats.get("cleared_crossing", 0),
+            tag_stats.get("cleared_bends", 0),
             group_stats.get("groups", 0),
             group_stats.get("crossing_count", 0),
             copy_stats.get("panels", 0),
             copy_stats.get("members_copied", 0),
             copy_stats.get("host_groups", 0)
             or group_stats.get("groups", 0),
+            "ON" if sync_on else "OFF",
         )
     )
 
@@ -244,14 +262,17 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         msg += (
             "\n\nPanel framing is in the host model. "
             "Remove the structural link (Manage Links → Remove) "
-            "when all panels show OK in Verify.\n\n"
-            "Use Sync Panel Selection to UNGROUP for editing, "
-            "then regroup when done."
+            "when all panels show OK in Verify."
         )
     elif link_framing:
         msg += (
-            "\n\nUse Sync Panel Selection to ungroup/regroup panels "
-            "after copying framing to the host."
+            "\n\nClick any panel or MEP in the view — sync selects "
+            "the full panel + MEP pair automatically. "
+            "Use Sync Panel Selection to turn sync OFF when done."
+        )
+    elif sync_on:
+        msg += (
+            "\n\nUse Sync Panel Selection to turn sync OFF when done."
         )
 
     forms.alert(msg, title="UNIQUBE — Prepare MEP Panels")

@@ -1,6 +1,5 @@
 title: Prepare MEP Panels
 tooltip: >-
-  One step: group MEP with panels, copy linked framing into the host model,
-  regroup panel + MEP together, and turn on click-to-select sync. Tags MEP
-  for shop drawings.
+  One step: auto-fill BIMSF_Container on MEP, group panels, copy linked
+  framing into host, regroup panel + MEP, and turn on click-to-select sync.
 author: Uniqube

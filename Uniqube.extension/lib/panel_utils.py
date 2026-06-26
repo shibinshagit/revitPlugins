@@ -104,6 +104,7 @@ MEP_CATS = [
     DB.BuiltInCategory.OST_ConduitFitting,
     DB.BuiltInCategory.OST_PipeCurves,
     DB.BuiltInCategory.OST_PipeFitting,
+    DB.BuiltInCategory.OST_PipeAccessory,
     DB.BuiltInCategory.OST_PipeInsulations,
     DB.BuiltInCategory.OST_ElectricalFixtures,
     DB.BuiltInCategory.OST_CableTray,
@@ -118,7 +119,11 @@ MEP_CATS = [
     DB.BuiltInCategory.OST_ElectricalEquipment,
     DB.BuiltInCategory.OST_MechanicalEquipment,
     DB.BuiltInCategory.OST_Sprinklers,
+    DB.BuiltInCategory.OST_PlumbingFixtures,
+    DB.BuiltInCategory.OST_GenericModel,
 ]
+
+BEND_OR_FITTING_PARAM = "Bend or Fitting"
 
 # Host + link spatial assignment for panel grouping workflows.
 LINK_ASSIGN_CATS = MEP_CATS + [DB.BuiltInCategory.OST_StructuralFraming]
@@ -297,6 +302,56 @@ def _set_container(elem, pid):
     return False
 
 
+def _clear_container(elem):
+    p = elem.LookupParameter(PARAM_NAME)
+    if p and not p.IsReadOnly:
+        try:
+            p.Set("")
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _is_conduit_bend(elem):
+    """True for conduit fittings marked as bends (excluded from panel schedules)."""
+    bend_param = elem.LookupParameter(BEND_OR_FITTING_PARAM)
+    if bend_param and bend_param.HasValue:
+        val = bend_param.AsString()
+        if val and "bend" in val.lower():
+            return True
+    return False
+
+
+def _panel_in_selection(pid, selected):
+    if not selected:
+        return True
+    return any(panel_ids_match(pid, s) for s in selected)
+
+
+def _append_bimsf_param_assignments(doc, panel_outlines, host_assignments):
+    """Assign any host element with BIMSF_Container inside a panel zone."""
+    for pid, outline in panel_outlines.items():
+        nearby = (
+            DB.FilteredElementCollector(doc)
+            .WherePasses(DB.BoundingBoxIntersectsFilter(outline))
+            .WhereElementIsNotElementType()
+            .ToElements()
+        )
+        for item in nearby:
+            cat = item.Category
+            if cat is not None and cat.BuiltInCategory == (
+                DB.BuiltInCategory.OST_StructuralFraming
+            ):
+                continue
+            p = item.LookupParameter(PARAM_NAME)
+            if p is None:
+                continue
+            if item.Id not in host_assignments:
+                host_assignments[item.Id] = set()
+            host_assignments[item.Id].add(pid)
+
+
 def set_panel_labels(elem, panel_id):
     """Write BIMSF_Container and Panel Name on a host element."""
     display = panel_display_name(panel_id)
@@ -464,6 +519,8 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
             if item.Id in host_assignments:
                 host_assignments[item.Id].add(pid)
 
+    _append_bimsf_param_assignments(doc, panel_outlines, host_assignments)
+
     link_assignments = []
     stats = {"link_matched": 0}
 
@@ -512,6 +569,73 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
     return host_assignments, link_assignments, stats
 
 
+def fill_mep_bimsf_containers(
+    doc,
+    panel_elements,
+    link_zones=None,
+    selected=None,
+    clear_crossings=True,
+    clear_bends=True,
+):
+    """Write BIMSF_Container on host MEP inside each panel zone (spatial match).
+
+    Pipes, conduits, fittings, fixtures, and any other host element that has
+    a writable BIMSF_Container parameter inside the panel bounding box are
+    tagged automatically. Crossing elements (two+ panels) are cleared.
+    """
+    stats = {
+        "tagged": 0,
+        "updated": 0,
+        "cleared_crossing": 0,
+        "cleared_bends": 0,
+        "skipped_no_param": 0,
+        "unassigned": 0,
+    }
+    mep_assignments, _, _ = assign_mep_to_panels(
+        doc, panel_elements, link_zones
+    )
+
+    for eid, pids in mep_assignments.items():
+        el = doc.GetElement(eid)
+        if el is None:
+            continue
+
+        if clear_bends and _is_conduit_bend(el):
+            if _clear_container(el):
+                stats["cleared_bends"] += 1
+            continue
+
+        if len(pids) == 0:
+            stats["unassigned"] += 1
+            continue
+
+        if len(pids) > 1:
+            if clear_crossings and _clear_container(el):
+                stats["cleared_crossing"] += 1
+            continue
+
+        pid = list(pids)[0]
+        if not _panel_in_selection(pid, selected):
+            continue
+
+        existing = el.LookupParameter(PARAM_NAME)
+        if existing is None or existing.IsReadOnly:
+            stats["skipped_no_param"] += 1
+            continue
+
+        had_value = existing.HasValue and existing.AsString()
+        if had_value and panel_ids_match(had_value, pid):
+            continue
+
+        set_panel_labels(el, pid)
+        if had_value:
+            stats["updated"] += 1
+        else:
+            stats["tagged"] += 1
+
+    return stats
+
+
 def _view_color_kit(doc):
     """Fill pattern + red override + factory for random panel colors."""
     fill_pattern = (
@@ -549,111 +673,6 @@ def _delete_groups_in_doc(doc, selected):
                         doc.Delete(g.Id)
                     except Exception:
                         pass
-
-
-def discover_host_panel_ids(doc):
-    """Collect panel ids from host framing, groups, and link zones."""
-    panel_elements = map_framing(doc)
-    link_zones = map_framing_from_links(doc)
-    ids = get_all_panel_ids(panel_elements, link_zones)
-    for g in DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements():
-        name = strip_group_prefix(g.Name)
-        if name:
-            ids.add(name)
-    return sorted(ids, key=lambda x: panel_display_name(x).lower())
-
-
-def count_panel_groups(doc, panel_ids=None):
-    """Count Revit groups that match panel naming."""
-    if panel_ids is None:
-        panel_ids = discover_host_panel_ids(doc)
-    count = 0
-    for g in DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements():
-        for pid in panel_ids:
-            if group_matches_panel(g.Name, pid):
-                count += 1
-                break
-    return count
-
-
-def ungroup_panels_in_host(doc, panel_ids=None):
-    """Ungroup host panel groups and disassemble host assemblies."""
-    if panel_ids is None:
-        panel_ids = discover_host_panel_ids(doc)
-    ungrouped = 0
-    seen = set()
-    for g in list(
-        DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements()
-    ):
-        for pid in panel_ids:
-            if not group_matches_panel(g.Name, pid):
-                continue
-            gid = g.Id.IntegerValue
-            if gid in seen:
-                break
-            try:
-                g.UngroupMembers()
-                ungrouped += 1
-                seen.add(gid)
-            except Exception:
-                pass
-            break
-
-    disassembled = 0
-    for asm in list(
-        DB.FilteredElementCollector(doc)
-        .OfClass(DB.AssemblyInstance)
-        .ToElements()
-    ):
-        asm_name = ""
-        try:
-            asm_name = asm.AssemblyTypeName or ""
-        except Exception:
-            pass
-        if not asm_name:
-            try:
-                asm_name = asm.Name or ""
-            except Exception:
-                pass
-        for pid in panel_ids:
-            if not group_matches_panel(asm_name, pid):
-                continue
-            try:
-                asm.Disassemble()
-                disassembled += 1
-            except Exception:
-                pass
-            break
-
-    return {
-        "ungrouped": ungrouped,
-        "disassembled": disassembled,
-        "panel_ids": list(panel_ids),
-    }
-
-
-def get_framing_link_names(doc):
-    """Return names of loaded links that contain structural framing."""
-    names = []
-    links = (
-        DB.FilteredElementCollector(doc)
-        .OfClass(DB.RevitLinkInstance)
-        .ToElements()
-    )
-    for link_inst in links:
-        link_doc = link_inst.GetLinkDocument()
-        if link_doc is None:
-            continue
-        if map_framing(link_doc):
-            try:
-                names.append(link_inst.Name)
-            except Exception:
-                names.append("Revit Link")
-    return names
-
-
-def has_framing_links(doc):
-    return bool(get_framing_link_names(doc))
 
 
 class _CopyUseDestinationTypes(DB.IDuplicateTypeNamesHandler):
@@ -909,7 +928,66 @@ def reload_links_for_paths(host_doc, paths):
 
 
 def select_panel_pair(uidoc, host_doc, pid, link_framing):
-    """Deprecated — auto-select removed. Use Sync Panel Selection to group/ungroup."""
+    """Select ONE panel's host group; include link only if framing is still linked."""
+    refs = List[DB.Reference]()
+    host_framing = map_framing(host_doc)
+    host_only = bool(merge_framing_for_panel(host_framing, pid))
+    links = (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.RevitLinkInstance)
+        .ToElements()
+    )
+
+    for g in (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.Group)
+        .ToElements()
+    ):
+        if not group_matches_panel(g.Name, pid):
+            continue
+        try:
+            refs.Add(DB.Reference(g))
+        except Exception:
+            pass
+        break
+
+    if host_only:
+        if refs.Count > 0:
+            uidoc.Selection.SetReferences(refs)
+            return refs.Count
+        return 0
+
+    link_group_found = False
+    for link_inst in links:
+        link_doc = link_inst.GetLinkDocument()
+        if link_doc is None:
+            continue
+        for g in (
+            DB.FilteredElementCollector(link_doc)
+            .OfClass(DB.Group)
+            .ToElements()
+        ):
+            if not group_matches_panel(g.Name, pid):
+                continue
+            try:
+                refs.Add(DB.Reference(g).CreateLinkReference(link_inst))
+                link_group_found = True
+            except Exception:
+                pass
+            break
+
+    if not link_group_found:
+        if link_framing is None:
+            link_framing = map_link_framing_by_container(host_doc)
+        for link_inst, elem in merge_link_framing_for_panel(link_framing, pid):
+            try:
+                refs.Add(DB.Reference(elem).CreateLinkReference(link_inst))
+            except Exception:
+                pass
+
+    if refs.Count > 0:
+        uidoc.Selection.SetReferences(refs)
+        return refs.Count
     return 0
 
 

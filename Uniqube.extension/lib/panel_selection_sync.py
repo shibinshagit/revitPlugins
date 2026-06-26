@@ -1,159 +1,200 @@
 # -*- coding: utf-8 -*-
-"""Toggle host panel groups — ungroup for editing, regroup when done.
+"""Keep panel + MEP selected together when clicking in the view.
 
-When UNGROUPED there is no background selection logic — normal Revit only.
+Uses UIApplication.Idling (works on all Revit versions — UIDocument
+does not expose SelectionChanged in older releases).
 """
-import __main__
-
-from pyrevit import script
+from System import EventHandler
+from Autodesk.Revit.UI.Events import IdlingEventArgs
+from pyrevit import DB
 
 import panel_utils as pu
 
-_ENV_UNGROUPED = "uniqube_panel_ungrouped"
-_STORE_PIDS = "uniqube_panel_sync_pids"
-_HANDLER_LIST_KEY = "_uniqube_idling_handler_list"
+_uiapp = None
+_idling_handler = None
+_host_doc = None
+_enabled = False
+_syncing = False
+_last_fingerprint = None
 
 
-def is_ungrouped(uidoc=None):
-    return bool(script.get_envvar(_ENV_UNGROUPED))
-
-
-def is_enabled(uidoc=None):
-    return is_ungrouped(uidoc)
-
-
-def is_grouped(uidoc=None):
-    return not is_ungrouped(uidoc)
-
-
-def mark_grouped():
-    script.set_envvar(_ENV_UNGROUPED, False)
-    script.set_envvar("uniqube_panel_sync_active", False)
-
-
-def mark_ungrouped():
-    script.set_envvar(_ENV_UNGROUPED, True)
-    script.set_envvar("uniqube_panel_sync_active", False)
-
-
-def _handler_list():
-    if not hasattr(__main__, _HANDLER_LIST_KEY):
-        setattr(__main__, _HANDLER_LIST_KEY, [])
-    return getattr(__main__, _HANDLER_LIST_KEY)
-
-
-def purge_legacy_idling(uiapp):
-    """Remove all tracked UNIQUBE Idling handlers (legacy auto-select)."""
-    removed = 0
-
-    for handler in list(_handler_list()):
-        for _ in range(10):
-            try:
-                uiapp.Idling -= handler
-                removed += 1
-            except Exception:
-                break
-    setattr(__main__, _HANDLER_LIST_KEY, [])
-
-    for attr in (
-        "_idling_handler",
-        "_uniqube_panel_sync_handler",
-        "_uniqube_sync_handler",
-        "_guard_handler",
-    ):
-        handler = getattr(__main__, attr, None)
-        if handler is not None:
-            for _ in range(10):
-                try:
-                    uiapp.Idling -= handler
-                    removed += 1
-                except Exception:
-                    break
-            try:
-                delattr(__main__, attr)
-            except Exception:
-                setattr(__main__, attr, None)
-
+def _selection_fingerprint(uidoc):
+    parts = []
     try:
-        import panel_selection_sync as self_module
-        for attr in ("_idling_handler", "_guard_handler"):
-            handler = getattr(self_module, attr, None)
-            if handler is not None:
-                for _ in range(10):
-                    try:
-                        uiapp.Idling -= handler
-                        removed += 1
-                    except Exception:
-                        break
-                setattr(self_module, attr, None)
+        for eid in uidoc.Selection.GetElementIds():
+            parts.append("H{}".format(eid.IntegerValue))
     except Exception:
         pass
-
-    return removed
-
-
-def _load_panel_ids(doc):
     try:
-        stored = script.load_data(_STORE_PIDS, this_project=True)
-        if stored:
-            return list(stored)
+        for ref in uidoc.Selection.GetReferences():
+            le = ref.LinkedElementId
+            le_id = le.IntegerValue if le else -1
+            parts.append("L{}:{}".format(ref.ElementId.IntegerValue, le_id))
     except Exception:
         pass
-    return pu.discover_host_panel_ids(doc)
+    parts.sort()
+    return tuple(parts)
 
 
-def _save_panel_ids(panel_ids):
+def _container_value(elem):
+    if elem is None:
+        return None
+    p = elem.LookupParameter(pu.PARAM_NAME)
+    if p and p.HasValue:
+        val = p.AsString()
+        if val:
+            return val
+    p = elem.LookupParameter(pu.PANEL_NAME_PARAM)
+    if p and p.HasValue:
+        val = p.AsString()
+        if val:
+            return val
+    return None
+
+
+def _host_group_name_for_element(host_doc, elem):
     try:
-        script.store_data(_STORE_PIDS, list(panel_ids), this_project=True)
+        gid = elem.GroupId
+        if gid is None or gid == DB.ElementId.InvalidElementId:
+            return None
+        grp = host_doc.GetElement(gid)
+        if grp is not None and isinstance(grp, DB.Group):
+            return grp.Name
     except Exception:
         pass
+    return None
 
 
-def ungroup_panels(uidoc, view=None):
-    """Ungroup host panels — no background selection behavior."""
+def detect_panel_from_selection(uidoc, host_doc):
+    """Return one panel id if the current selection belongs to a single panel."""
+    panels = []
+
+    for eid in uidoc.Selection.GetElementIds():
+        el = host_doc.GetElement(eid)
+        if el is None:
+            continue
+        if isinstance(el, DB.Group):
+            panels.append(pu.panel_display_name(el.Name))
+            continue
+        c = _container_value(el)
+        if c:
+            panels.append(c)
+            continue
+        gname = _host_group_name_for_element(host_doc, el)
+        if gname:
+            panels.append(pu.panel_display_name(gname))
+
+    invalid = DB.ElementId.InvalidElementId
+    for ref in uidoc.Selection.GetReferences():
+        try:
+            link_elem_id = ref.LinkedElementId
+        except Exception:
+            link_elem_id = invalid
+        if link_elem_id is None or link_elem_id == invalid:
+            continue
+        link_inst = host_doc.GetElement(ref.ElementId)
+        if link_inst is None:
+            continue
+        link_doc = link_inst.GetLinkDocument()
+        if link_doc is None:
+            continue
+        elem = link_doc.GetElement(link_elem_id)
+        if elem is None:
+            continue
+        if isinstance(elem, DB.Group):
+            panels.append(pu.panel_display_name(elem.Name))
+            continue
+        c = _container_value(elem)
+        if c:
+            panels.append(c)
+
+    if not panels:
+        return None
+
+    displays = set()
+    canonical = []
+    for p in panels:
+        d = pu.panel_display_name(p).lower()
+        if d not in displays:
+            displays.add(d)
+            canonical.append(p)
+
+    if len(displays) == 1:
+        return canonical[0]
+    return None
+
+
+def _process_selection(uidoc):
+    global _syncing, _last_fingerprint
+    if _syncing or not _enabled:
+        return
+
     doc = uidoc.Document
-    uiapp = uidoc.Application
-    purge_legacy_idling(uiapp)
-    panel_ids = _load_panel_ids(doc)
-    stats = pu.ungroup_panels_in_host(doc, panel_ids)
-    _save_panel_ids(stats.get("panel_ids", panel_ids))
-    mark_ungrouped()
-    return stats
+    if _host_doc is not None and doc.Title != _host_doc.Title:
+        return
+
+    fp = _selection_fingerprint(uidoc)
+    if fp == _last_fingerprint:
+        return
+
+    pid = detect_panel_from_selection(uidoc, doc)
+    if not pid:
+        _last_fingerprint = fp
+        return
+
+    try:
+        _syncing = True
+        link_framing = pu.map_link_framing_by_container(doc)
+        pu.select_panel_pair(uidoc, doc, pid, link_framing)
+        _last_fingerprint = _selection_fingerprint(uidoc)
+    except Exception:
+        _last_fingerprint = fp
+    finally:
+        _syncing = False
 
 
-def regroup_panels(uidoc, view=None):
-    """Rebuild host panel groups (framing + MEP)."""
-    doc = uidoc.Document
-    uiapp = uidoc.Application
-    purge_legacy_idling(uiapp)
-    if view is None:
-        view = doc.ActiveView
-    panel_ids = _load_panel_ids(doc)
-    if not panel_ids:
-        panel_ids = pu.discover_host_panel_ids(doc)
-    stats = pu.regroup_panels_in_host(doc, view, panel_ids, tag_mep=False)
-    _save_panel_ids(panel_ids)
-    mark_grouped()
-    return stats
+def _on_idling(sender, args):
+    if not _enabled:
+        return
+    uidoc = sender.ActiveUIDocument
+    if uidoc is None:
+        return
+    _process_selection(uidoc)
 
 
-def toggle(uidoc, view=None):
-    if is_ungrouped(uidoc):
-        regroup_panels(uidoc, view)
-        return False
-    ungroup_panels(uidoc, view)
-    return True
+def is_enabled():
+    return _enabled
 
 
 def enable(uidoc):
-    mark_grouped()
-    if uidoc is not None:
-        purge_legacy_idling(uidoc.Application)
-    return False
+    global _uiapp, _idling_handler, _host_doc, _enabled, _last_fingerprint
+    disable(uidoc)
+    _host_doc = uidoc.Document
+    _uiapp = uidoc.Application
+    _idling_handler = EventHandler[IdlingEventArgs](_on_idling)
+    _uiapp.Idling += _idling_handler
+    _enabled = True
+    _last_fingerprint = None
+    return True
 
 
 def disable(uidoc):
-    mark_ungrouped()
-    if uidoc is not None:
-        purge_legacy_idling(uidoc.Application)
-    return False
+    global _uiapp, _idling_handler, _host_doc, _enabled, _last_fingerprint
+    if _idling_handler is not None and _uiapp is not None:
+        try:
+            _uiapp.Idling -= _idling_handler
+        except Exception:
+            pass
+    _idling_handler = None
+    _uiapp = None
+    _host_doc = None
+    _enabled = False
+    _last_fingerprint = None
+
+
+def toggle(uidoc):
+    if _enabled:
+        disable(uidoc)
+        return False
+    enable(uidoc)
+    return True
