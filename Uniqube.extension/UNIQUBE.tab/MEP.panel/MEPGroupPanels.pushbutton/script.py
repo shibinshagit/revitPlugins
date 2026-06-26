@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""MEP panel grouping with linked framing models (Task 5)."""
+"""MEP panel grouping with linked framing models (Task 5).
+
+Host MEP model: groups MEP + colors panels, edits link .rvt for panel groups.
+Framing link model (open .rvt directly): groups panel framing only.
+"""
 from pyrevit import revit, DB, forms, script
 from System.Windows.Controls import CheckBox
 from System.Windows.Media import Brushes
@@ -23,25 +27,27 @@ def _row_label(row):
         parts.append("[ panel: {} ]".format(row["host_framing"]))
     if row.get("source") == "link" and row.get("link_name"):
         parts.append("(link: {})".format(row["link_name"]))
-    elif row.get("source") == "host + link":
-        parts.append("(host + link)")
     return "  ".join(parts)
 
 
 class MEPPanelSelector(forms.WPFWindow):
-    def __init__(self, rows, crossing_count):
+    def __init__(self, rows, crossing_count, mode_host=True):
         forms.WPFWindow.__init__(self, "SelectMEPPanels.xaml")
         self._checks = []
         self.selected = None
 
-        link_panels = sum(1 for r in rows if "link" in r.get("source", ""))
-        self.summary_text.Text = (
-            "{0} panel(s). {1} from link(s). {2} crossing MEP (red). "
-            "Creates host MEP group + panel group inside each link .rvt "
-            "(same name, e.g. ELB-1001).".format(
-                len(rows), link_panels, crossing_count
+        if mode_host:
+            self.summary_text.Text = (
+                "{0} panel(s). {1} crossing MEP (red). "
+                "Groups MEP in this model + panel framing in the link .rvt.".format(
+                    len(rows), crossing_count
+                )
             )
-        )
+        else:
+            self.summary_text.Text = (
+                "{0} panel(s) in this framing model. "
+                "Creates one Revit group per panel.".format(len(rows))
+            )
 
         for row in rows:
             cb = CheckBox()
@@ -53,9 +59,7 @@ class MEPPanelSelector(forms.WPFWindow):
                 or row.get("link_framing", 0) > 0
             )
             cb.IsChecked = has_content
-            if row.get("source") == "link":
-                cb.Foreground = Brushes.DarkBlue
-            elif not has_content:
+            if not has_content:
                 cb.Foreground = Brushes.Gray
             self.panel_stack.Children.Add(cb)
             self._checks.append((cb, row["pid"]))
@@ -70,11 +74,11 @@ class MEPPanelSelector(forms.WPFWindow):
         self.Close()
 
 
-def choose_panels(rows, crossing_count):
+def choose_panels(rows, crossing_count, mode_host=True):
     if not rows:
         return None
     try:
-        win = MEPPanelSelector(rows, crossing_count)
+        win = MEPPanelSelector(rows, crossing_count, mode_host)
         win.ShowDialog()
         return win.selected
     except Exception as ex:
@@ -83,7 +87,6 @@ def choose_panels(rows, crossing_count):
 
 
 def _build_catalog(doc):
-    """Build panel list without relying on build_panel_catalog return shape."""
     panel_elements = pu.map_framing(doc)
     link_zones = pu.map_framing_from_links(doc)
     link_framing = pu.map_link_framing_by_container(doc)
@@ -93,6 +96,7 @@ def _build_catalog(doc):
 
     all_pids = pu.get_all_panel_ids(panel_elements, link_zones)
     all_pids.update(link_framing.keys())
+    all_pids.update(panel_elements.keys())
 
     rows = []
     for pid in sorted(all_pids, key=lambda x: pu.panel_display_name(x).lower()):
@@ -125,42 +129,69 @@ def _build_catalog(doc):
     return rows, panel_elements, link_zones, link_framing
 
 
-def main():
+def _is_framing_primary_doc(doc):
+    """True when this IS the framing link file opened directly."""
+    if doc.IsLinked:
+        return False
+    has_links = (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.RevitLinkInstance)
+        .GetElementCount()
+    )
+    if has_links > 0:
+        return False
+    return bool(pu.map_framing(doc))
+
+
+def _offer_select_one(selected, link_framing):
+    """Let user pick ONE panel — selects its MEP group + panel framing together."""
+    if not selected or len(selected) < 1:
+        return 0
+    display_map = {pu.panel_display_name(p): p for p in selected}
+    options = sorted(display_map.keys())
+    pick = forms.SelectFromList.show(
+        options,
+        title="UNIQUBE — Select one panel (MEP + panel together)",
+        button_name="Select",
+    )
+    if not pick:
+        return 0
+    pid = display_map.get(pick)
+    if not pid:
+        return 0
+    try:
+        return pu.select_panel_pair(uidoc, doc, pid, link_framing)
+    except Exception as ex:
+        logger.debug("select_panel_pair failed: %s", ex)
+        return 0
+
+
+def _run_framing_doc(selected):
+    stats = {"link_groups": 0, "errors": []}
+    with revit.Transaction("UNIQUBE: Group Panel Framing"):
+        pu._delete_groups_in_doc(doc, selected)
+        stats = pu.group_framing_in_active_doc(doc, selected)
+    msg = (
+        "Done (framing model).\n\n"
+        "Panel groups created: {}\n\n"
+        "Next: open the MEP host model and run this button "
+        "there to group MEP for the same panels.".format(
+            stats.get("link_groups", 0)
+        )
+    )
+    if stats.get("errors"):
+        msg += "\n\nIssues:\n" + "\n".join(stats["errors"][:5])
+    forms.alert(msg, title="UNIQUBE — MEP Group Panels")
+    return stats
+
+
+def _run_host_doc(selected, panel_elements, link_zones, link_framing):
+    stats = {}
+    link_stats = {"link_groups": 0, "link_files": 0, "reloaded": 0, "errors": []}
+
     if isinstance(view, DB.ViewSheet):
         forms.alert("Open a model view, not a sheet.", title="UNIQUBE")
         return
-
-    required = (
-        "combine_panels_group_color",
-        "group_link_panel_framing",
-        "panel_ids_match",
-    )
-    missing = [n for n in required if not hasattr(pu, n)]
-    if missing:
-        forms.alert(
-            "panel_utils.py is out of date (missing: {}).\n\n"
-            "git pull the full revitPlugins folder, then pyRevit → Reload.".format(
-                ", ".join(missing)
-            ),
-            title="UNIQUBE — MEP Group Panels",
-        )
-        return
-
-    rows, panel_elements, link_zones, link_framing = _build_catalog(doc)
-    if not rows:
-        forms.alert(
-            "No panels with '{}' in host or links.".format(pu.PARAM_NAME),
-            title="UNIQUBE — MEP Group Panels",
-        )
-        return
-
-    crossing = pu.preview_crossing_mep(doc, panel_elements, link_zones)
-    selected = choose_panels(rows, crossing)
-    if not selected:
-        return
-
-    stats = {}
-    link_stats = {"link_groups": 0, "link_files": 0, "reloaded": 0, "errors": []}
 
     try:
         with revit.Transaction("UNIQUBE: MEP Group Panels"):
@@ -175,11 +206,7 @@ def main():
                 tag_mep=True,
             )
     except Exception as ex:
-        forms.alert(
-            "Host grouping failed:\n{}".format(ex),
-            title="UNIQUBE — MEP Group Panels",
-        )
-        logger.debug("Host grouping failed: %s", ex)
+        forms.alert("Host grouping failed:\n{}".format(ex), title="UNIQUBE")
         return
 
     try:
@@ -188,36 +215,19 @@ def main():
         )
     except Exception as ex:
         link_stats["errors"].append("Link grouping: {}".format(ex))
-        logger.debug("Link grouping failed: %s", ex)
-
-    selected_count = 0
-    try:
-        selected_count = pu.select_panels_in_view(
-            uidoc, doc, selected, link_framing
-        )
-    except Exception as ex:
-        logger.debug("Selection failed: %s", ex)
 
     msg = (
         "Done.\n\n"
-        "Panels processed: {}\n"
-        "Host groups (MEP): {}\n"
-        "Host MEP tagged: {}\n"
-        "Link groups (panel in .rvt): {}\n"
+        "Host MEP groups: {}\n"
+        "Link panel groups: {}\n"
         "Link files edited: {}\n"
         "Links reloaded: {}\n"
-        "Panel framing colored: {}\n"
-        "Crossing MEP (red): {}\n"
-        "Groups selected: {}".format(
-            len(selected),
+        "Crossing MEP (red): {}".format(
             stats.get("groups", 0),
-            stats.get("mep_tagged", 0),
             link_stats.get("link_groups", 0),
             link_stats.get("link_files", 0),
             link_stats.get("reloaded", 0),
-            stats.get("link_framing_colored", 0),
             stats.get("crossing_count", 0),
-            selected_count,
         )
     )
     errors = stats.get("group_errors", []) + link_stats.get("errors", [])
@@ -225,12 +235,44 @@ def main():
         msg += "\n\nIssues:\n" + "\n".join(errors[:6])
     if link_stats.get("link_groups", 0) == 0 and link_framing:
         msg += (
-            "\n\nTip: Link groups need a saved local path. "
-            "Save Willow Street_Framing.rvt locally, close it if open "
-            "separately, then run again."
+            "\n\nIf link groups = 0: open Willow Street_Framing.rvt "
+            "directly (not as link), run this same button there to "
+            "group panel framing, then return to the MEP model."
         )
-
     forms.alert(msg, title="UNIQUBE — MEP Group Panels")
+
+    _offer_select_one(selected, link_framing)
+
+
+def main():
+    if not hasattr(pu, "select_panel_pair"):
+        forms.alert(
+            "panel_utils.py is out of date.\n\n"
+            "git pull the full revitPlugins folder, then pyRevit → Reload.",
+            title="UNIQUBE",
+        )
+        return
+
+    rows, panel_elements, link_zones, link_framing = _build_catalog(doc)
+    if not rows:
+        forms.alert(
+            "No panels with '{}' found.".format(pu.PARAM_NAME),
+            title="UNIQUBE",
+        )
+        return
+
+    framing_only = _is_framing_primary_doc(doc)
+    crossing = 0 if framing_only else pu.preview_crossing_mep(
+        doc, panel_elements, link_zones
+    )
+    selected = choose_panels(rows, crossing, mode_host=not framing_only)
+    if not selected:
+        return
+
+    if framing_only:
+        _run_framing_doc(selected)
+    else:
+        _run_host_doc(selected, panel_elements, link_zones, link_framing)
 
 
 main()

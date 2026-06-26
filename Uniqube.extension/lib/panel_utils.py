@@ -596,39 +596,62 @@ def _link_instances_for_path(host_doc, path):
     return result
 
 
-def _unload_link_instances(link_insts):
+def _unload_link_instances(host_doc, link_insts):
+    """Unload link instances — must run inside a host-document transaction."""
     unloaded = []
-    for link_inst in link_insts:
-        try:
+    if not link_insts:
+        return unloaded
+    t = DB.Transaction(host_doc, "UNIQUBE: Unload Link")
+    try:
+        t.Start()
+        for link_inst in link_insts:
             if link_inst.IsLoaded():
                 link_inst.Unload()
                 unloaded.append(link_inst)
-        except Exception:
-            pass
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
     return unloaded
 
 
-def _load_link_instances(link_insts):
+def _load_link_instances(host_doc, link_insts):
+    """Reload previously unloaded link instances."""
     count = 0
-    for link_inst in link_insts:
-        try:
+    if not link_insts:
+        return count
+    t = DB.Transaction(host_doc, "UNIQUBE: Reload Link")
+    try:
+        t.Start()
+        for link_inst in link_insts:
             if not link_inst.IsLoaded():
                 link_inst.Load()
                 count += 1
-        except Exception:
-            pass
+        t.Commit()
+    except Exception:
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
     return count
 
 
-def _open_document_for_edit(app, path, host_doc):
-    """Return (doc, opened_here, close_when_done) for a link file path."""
+def _is_primary_document(doc):
+    try:
+        return doc is not None and not doc.IsLinked
+    except Exception:
+        return False
+
+
+def _open_document_for_edit(app, path):
+    """Open a link .rvt as a primary document for editing."""
     if not path:
         return None, False, False
     norm = path.lower()
     for d in app.Documents:
         try:
+            if not _is_primary_document(d):
+                continue
             dp = _document_path(d)
-            if dp and dp.lower() == norm and not d.IsLinked:
+            if dp and dp.lower() == norm:
                 return d, False, False
         except Exception:
             pass
@@ -637,9 +660,35 @@ def _open_document_for_edit(app, path, host_doc):
         opts = DB.OpenOptions()
         opts.Audit = False
         opened = app.OpenDocumentFile(mp, opts)
+        if not _is_primary_document(opened):
+            return None, False, False
         return opened, True, True
     except Exception:
         return None, False, False
+
+
+def group_framing_in_active_doc(doc, selected):
+    """Group panel framing in the active (primary) document."""
+    framing = map_framing(doc)
+    stats = {"link_groups": 0, "errors": []}
+    t = DB.Transaction(doc, "UNIQUBE: Group Panel Framing")
+    try:
+        t.Start()
+        _delete_groups_in_doc(doc, selected)
+        for pid in selected:
+            group_ids = List[DB.ElementId]()
+            for el in merge_framing_for_panel(framing, pid):
+                group_ids.Add(el.Id)
+            if group_ids.Count > 1:
+                grp = doc.Create.NewGroup(group_ids)
+                grp.GroupType.Name = panel_group_name(pid)
+                stats["link_groups"] += 1
+        t.Commit()
+    except Exception as ex:
+        stats["errors"].append(str(ex))
+        if t.HasStarted() and not t.HasEnded():
+            t.RollBack()
+    return stats
 
 
 def group_link_panel_framing(app, host_doc, selected, link_framing):
@@ -675,16 +724,14 @@ def group_link_panel_framing(app, host_doc, selected, link_framing):
 
     for path, panels in by_path.items():
         link_insts = link_inst_map.get(path, [])
-        unloaded = _unload_link_instances(link_insts)
+        unloaded = _unload_link_instances(host_doc, link_insts)
 
-        edit_doc, opened_here, close_after = _open_document_for_edit(
-            app, path, host_doc
-        )
-        if edit_doc is None:
+        edit_doc, opened_here, close_after = _open_document_for_edit(app, path)
+        if edit_doc is None or not _is_primary_document(edit_doc):
             stats["errors"].append(
-                "Could not open link file (unload failed?): {}".format(path)
+                "Could not open link file for editing: {}".format(path)
             )
-            _load_link_instances(unloaded)
+            _load_link_instances(host_doc, unloaded)
             continue
 
         stats["link_files"] += 1
@@ -719,8 +766,7 @@ def group_link_panel_framing(app, host_doc, selected, link_framing):
                     edit_doc.Close(False)
                 except Exception:
                     pass
-            loaded = _load_link_instances(unloaded)
-            stats["reloaded"] += loaded
+            stats["reloaded"] += _load_link_instances(host_doc, unloaded)
 
     return stats
 
@@ -747,8 +793,8 @@ def reload_links_for_paths(host_doc, paths):
     return count
 
 
-def select_panels_in_view(uidoc, host_doc, selected, link_framing):
-    """Select host + link Revit group objects for each panel."""
+def select_panel_pair(uidoc, host_doc, pid, link_framing):
+    """Select ONE panel's host MEP group + linked panel framing together."""
     refs = List[DB.Reference]()
     links = (
         DB.FilteredElementCollector(host_doc)
@@ -756,41 +802,56 @@ def select_panels_in_view(uidoc, host_doc, selected, link_framing):
         .ToElements()
     )
 
-    for pid in selected:
+    for g in (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.Group)
+        .ToElements()
+    ):
+        if not group_matches_panel(g.Name, pid):
+            continue
+        try:
+            refs.Add(DB.Reference(g))
+        except Exception:
+            pass
+        break
+
+    link_group_found = False
+    for link_inst in links:
+        link_doc = link_inst.GetLinkDocument()
+        if link_doc is None:
+            continue
         for g in (
-            DB.FilteredElementCollector(host_doc)
+            DB.FilteredElementCollector(link_doc)
             .OfClass(DB.Group)
             .ToElements()
         ):
             if not group_matches_panel(g.Name, pid):
                 continue
             try:
-                refs.Add(DB.Reference(g))
+                refs.Add(DB.Reference(g).CreateLinkReference(link_inst))
+                link_group_found = True
             except Exception:
                 pass
             break
 
-        for link_inst in links:
-            link_doc = link_inst.GetLinkDocument()
-            if link_doc is None:
-                continue
-            for g in (
-                DB.FilteredElementCollector(link_doc)
-                .OfClass(DB.Group)
-                .ToElements()
-            ):
-                if not group_matches_panel(g.Name, pid):
-                    continue
-                try:
-                    refs.Add(DB.Reference(g).CreateLinkReference(link_inst))
-                except Exception:
-                    pass
-                break
+    if not link_group_found:
+        for link_inst, elem in merge_link_framing_for_panel(link_framing, pid):
+            try:
+                refs.Add(DB.Reference(elem).CreateLinkReference(link_inst))
+            except Exception:
+                pass
 
     if refs.Count > 0:
         uidoc.Selection.SetReferences(refs)
         return refs.Count
     return 0
+
+
+def select_panels_in_view(uidoc, host_doc, selected, link_framing):
+    """Select each panel pair one at a time — use select_panel_pair instead."""
+    if not selected:
+        return 0
+    return select_panel_pair(uidoc, host_doc, selected[0], link_framing)
 
 
 def combine_panels_group_color(
