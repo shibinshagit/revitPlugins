@@ -323,6 +323,7 @@ def build_panel_catalog(doc):
     link_framing_counts = count_link_framing(link_framing)
     mep_counts = preview_mep_counts(doc, panel_elements, link_zones)
     all_pids = get_all_panel_ids(panel_elements, link_zones)
+    all_pids.update(link_framing.keys())
 
     rows = []
     for pid in sorted(all_pids, key=lambda x: panel_display_name(x).lower()):

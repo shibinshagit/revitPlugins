@@ -24,9 +24,9 @@ def _row_label(row):
     parts = [row["display"]]
     if row["mep_count"]:
         parts.append("[ MEP: {} ]".format(row["mep_count"]))
-    if row["link_framing"]:
+    if row.get("link_framing"):
         parts.append("[ panel: {} ]".format(row["link_framing"]))
-    elif row["host_framing"]:
+    elif row.get("host_framing"):
         parts.append("[ panel: {} ]".format(row["host_framing"]))
     if row["source"] == "link" and row["link_name"]:
         parts.append("(link: {})".format(row["link_name"]))
@@ -58,9 +58,9 @@ class MEPPanelSelector(forms.WPFWindow):
             cb.Content = _row_label(row)
             cb.Margin = Thickness(2, 3, 2, 3)
             has_content = (
-                row["mep_count"] > 0
-                or row["host_framing"] > 0
-                or row["link_framing"] > 0
+                row.get("mep_count", 0) > 0
+                or row.get("host_framing", 0) > 0
+                or row.get("link_framing", 0) > 0
             )
             cb.IsChecked = has_content
             if row["source"] == "link":
@@ -105,13 +105,39 @@ def _delete_existing_groups(selected):
                     pass
 
 
+def _load_catalog(doc):
+    """Load panel catalog; tolerate older panel_utils on partial sync."""
+    result = pu.build_panel_catalog(doc)
+    rows = result[0]
+    panel_elements = result[1]
+    link_zones = result[2]
+    if len(result) > 3:
+        link_framing = result[3]
+    else:
+        link_framing = pu.map_link_framing_by_container(doc)
+    # Older rows may lack link_framing count — fill in if needed.
+    counts = pu.count_link_framing(link_framing)
+    for row in rows:
+        if "link_framing" not in row:
+            row["link_framing"] = counts.get(row["pid"], 0)
+    return rows, panel_elements, link_zones, link_framing
+
+
 def main():
     if isinstance(view, DB.ViewSheet):
         forms.alert("Open a model view, not a sheet.", title="UNIQUBE")
         return
 
-    catalog = pu.build_panel_catalog(doc)
-    rows, panel_elements, link_zones, link_framing = catalog
+    if not hasattr(pu, "combine_panels_group_color"):
+        forms.alert(
+            "panel_utils.py is out of date on this machine.\n\n"
+            "Run git pull on the full revitPlugins folder, then "
+            "pyRevit → Reload.",
+            title="UNIQUBE — MEP Group Panels",
+        )
+        return
+
+    rows, panel_elements, link_zones, link_framing = _load_catalog(doc)
     if not rows:
         forms.alert(
             "No panels found.\n\n"
