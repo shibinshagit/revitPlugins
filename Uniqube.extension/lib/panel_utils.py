@@ -6,6 +6,48 @@ from System.Collections.Generic import List
 
 PARAM_NAME = "BIMSF_Container"
 
+# Legacy group type prefixes (ours and MWF) — panel name only in UI.
+_GROUP_PREFIXES = (
+    "BIMSF Panel ",
+    "BIMSF_Panel_",
+    "BIMSF Panel_",
+    "BIMSF_Panel ",
+)
+
+
+def strip_group_prefix(name):
+    """Remove 'BIMSF Panel …' / 'BIMSF_Panel_…' from a group type name."""
+    if not name:
+        return ""
+    text = name.strip()
+    for prefix in _GROUP_PREFIXES:
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
+
+
+def panel_display_name(raw):
+    """Clean panel name for lists/schedules — no group prefix, no leading '*'."""
+    name = strip_group_prefix(raw)
+    if name.startswith("*"):
+        name = name[1:]
+    return name.strip()
+
+
+def panel_group_name(container):
+    """Group type name = BIMSF_Container value only (e.g. *ELB-2001)."""
+    return (container or "").strip()
+
+
+def group_matches_panel(group_name, panel_id):
+    """True if a group type name belongs to the given panel id."""
+    if not group_name or not panel_id:
+        return False
+    g = strip_group_prefix(group_name)
+    p = (panel_id or "").strip()
+    return g == p or panel_display_name(g) == panel_display_name(p)
+
+
 MEP_CATS = [
     DB.BuiltInCategory.OST_Conduit,
     DB.BuiltInCategory.OST_ConduitFitting,

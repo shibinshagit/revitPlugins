@@ -1,30 +1,45 @@
 # -*- coding: utf-8 -*-
-"""Ungroup BIMSF_Panel_ groups. Pick single, multiple, or all."""
+"""Ungroup panel groups (BIMSF Panel / BIMSF_Panel_ / plain panel name)."""
 from pyrevit import revit, DB, forms, script
+import panel_utils as pu
 
 doc = revit.doc
 logger = script.get_logger()
 
 
 def main():
+    panel_ids = set(pu.map_framing(doc).keys())
     all_groups = (
         DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements()
     )
     bimsf_groups = {}
     for g in all_groups:
-        if g.Name.startswith("BIMSF_Panel_"):
-            pid = g.Name.replace("BIMSF_Panel_", "")
-            bimsf_groups[pid] = g
+        name = g.Name or ""
+        if name.startswith("BIMSF"):
+            pid = pu.strip_group_prefix(name)
+            if pid:
+                bimsf_groups[pid] = g
+            continue
+        if name in panel_ids:
+            bimsf_groups[name] = g
 
     if not bimsf_groups:
         forms.alert(
-            "No BIMSF_Panel_ groups found in this model.",
+            "No panel groups found in this model.",
             title="UNIQUBE",
         )
         return
 
-    sorted_ids = sorted(bimsf_groups.keys())
-    options = ["All groups ({})".format(len(sorted_ids))] + sorted_ids
+    sorted_ids = sorted(
+        bimsf_groups.keys(),
+        key=lambda x: pu.panel_display_name(x).lower(),
+    )
+    options = [
+        "All groups ({})".format(len(sorted_ids))
+    ] + [pu.panel_display_name(pid) for pid in sorted_ids]
+    display_to_pid = {
+        pu.panel_display_name(pid): pid for pid in sorted_ids
+    }
     selected = forms.SelectFromList.show(
         options,
         title="UNIQUBE — Select Panel(s) to Ungroup",
@@ -37,7 +52,7 @@ def main():
     if any("All groups" in s for s in selected):
         to_ungroup = sorted_ids
     else:
-        to_ungroup = selected
+        to_ungroup = [display_to_pid.get(s, s) for s in selected]
 
     with revit.Transaction("UNIQUBE: Ungroup Panels"):
         count = 0

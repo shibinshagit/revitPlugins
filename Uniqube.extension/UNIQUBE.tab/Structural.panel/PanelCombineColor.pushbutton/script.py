@@ -42,7 +42,7 @@ def main():
         )
         for g in all_groups:
             for pid in selected:
-                if g.Name == "BIMSF_Panel_" + str(pid):
+                if pu.group_matches_panel(g.Name, pid):
                     try:
                         doc.Delete(g.Id)
                     except Exception:
@@ -111,7 +111,7 @@ def main():
             if group_ids.Count > 1:
                 try:
                     new_grp = doc.Create.NewGroup(group_ids)
-                    new_grp.GroupType.Name = "BIMSF_Panel_" + str(pid)
+                    new_grp.GroupType.Name = pu.panel_group_name(pid)
                     group_count += 1
                 except Exception:
                     pass

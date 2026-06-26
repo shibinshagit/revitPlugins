@@ -15,6 +15,7 @@ schedule is built from them. Re-run the button to refresh after changes.
 import os
 import clr
 from pyrevit import revit, DB, forms, script
+import panel_utils as pu
 
 clr.AddReference("System.Data")
 from System.Data import DataTable
@@ -286,18 +287,19 @@ def populate_params(units):
 
     One row per panel number. Qty = number of instances (assemblies) that
     share the panel number. Dimensions and weight are for a single instance.
-    The panel number keeps its asterisk.
+    Panel names are shown without the leading '*' prefix.
     """
     summary = []
-    for pno in sorted(units.keys()):
+    for pno in sorted(units.keys(), key=lambda x: pu.panel_display_name(x).lower()):
         instances = units[pno]
         qty = len(instances)
         one = instances[0]
         length, height, thickness = _dims_strings(one)
         weight = "{0:.1f}".format(_panel_weight_lb(one))
+        display = pu.panel_display_name(pno)
         for members in instances:
-            _write(members, pno, str(qty), length, height, thickness, weight)
-        summary.append([pno, str(qty), length, height, thickness, weight])
+            _write(members, display, str(qty), length, height, thickness, weight)
+        summary.append([display, str(qty), length, height, thickness, weight])
     return summary
 
 
