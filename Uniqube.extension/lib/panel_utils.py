@@ -538,14 +538,24 @@ def _view_color_kit(doc):
 
 
 def _delete_groups_in_doc(doc, selected):
-    """Remove existing panel groups from any document."""
+    """Dissolve existing panel groups without deleting member elements."""
     for g in DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements():
         for pid in selected:
             if group_matches_panel(g.Name, pid):
                 try:
-                    doc.Delete(g.Id)
+                    g.UngroupMembers()
                 except Exception:
-                    pass
+                    try:
+                        doc.Delete(g.Id)
+                    except Exception:
+                        pass
+
+
+class _CopyUseDestinationTypes(DB.IDuplicateTypeNamesHandler):
+    """Auto-resolve duplicate type names during copy (no modal dialog)."""
+
+    def OnDuplicateTypeNamesFound(self, args):
+        return DB.DuplicateTypeAction.UseDestinationTypes
 
 
 def get_link_document_path(host_doc, link_inst):
@@ -794,8 +804,10 @@ def reload_links_for_paths(host_doc, paths):
 
 
 def select_panel_pair(uidoc, host_doc, pid, link_framing):
-    """Select ONE panel's host MEP group + linked panel framing together."""
+    """Select ONE panel's host group; include link only if framing is still linked."""
     refs = List[DB.Reference]()
+    host_framing = map_framing(host_doc)
+    host_only = bool(merge_framing_for_panel(host_framing, pid))
     links = (
         DB.FilteredElementCollector(host_doc)
         .OfClass(DB.RevitLinkInstance)
@@ -814,6 +826,12 @@ def select_panel_pair(uidoc, host_doc, pid, link_framing):
         except Exception:
             pass
         break
+
+    if host_only:
+        if refs.Count > 0:
+            uidoc.Selection.SetReferences(refs)
+            return refs.Count
+        return 0
 
     link_group_found = False
     for link_inst in links:
@@ -835,6 +853,8 @@ def select_panel_pair(uidoc, host_doc, pid, link_framing):
             break
 
     if not link_group_found:
+        if link_framing is None:
+            link_framing = map_link_framing_by_container(host_doc)
         for link_inst, elem in merge_link_framing_for_panel(link_framing, pid):
             try:
                 refs.Add(DB.Reference(elem).CreateLinkReference(link_inst))
@@ -1041,7 +1061,7 @@ def _flatten_copied_elements(host_doc, element_ids):
     return result, exploded
 
 
-def copy_panel_framing_to_host(host_doc, view, selected, link_framing, regroup=True):
+def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regroup=True):
     """Copy linked panel framing into the host, explode groups, regroup with MEP.
 
     After this, panel studs/tracks live in the host model and can be grouped
@@ -1054,11 +1074,19 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing, regroup=T
         "host_groups": 0,
         "skipped": [],
         "errors": [],
+        "verify": [],
+        "copied_pids": [],
     }
-    if not selected or not link_framing:
+    if not selected:
+        return stats
+
+    if link_framing is None:
+        link_framing = map_link_framing_by_container(host_doc)
+    if not link_framing:
         return stats
 
     copy_opts = DB.CopyPasteOptions()
+    copy_opts.SetDuplicateTypeNamesHandler(_CopyUseDestinationTypes())
     host_framing = map_framing(host_doc)
     copied_pids = []
 
@@ -1080,17 +1108,17 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing, regroup=T
             key = link_inst.Id.IntegerValue
             if key not in by_link:
                 by_link[key] = (link_inst, [])
-            by_link[key][1].append(elem)
+            by_link[key][1].append(elem.Id)
 
         panel_copied = False
-        for link_inst, elems in by_link.values():
+        for link_inst, elem_ids in by_link.values():
             link_doc = link_inst.GetLinkDocument()
             if link_doc is None:
                 continue
             transform = link_inst.GetTotalTransform()
             src_ids = List[DB.ElementId]()
-            for elem in elems:
-                src_ids.Add(elem.Id)
+            for eid in elem_ids:
+                src_ids.Add(eid)
             try:
                 new_ids = DB.ElementTransformUtils.CopyElements(
                     link_doc,
@@ -1113,25 +1141,74 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing, regroup=T
         if panel_copied:
             stats["panels"] += 1
             copied_pids.append(pid)
+            stats["copied_pids"] = copied_pids
+            host_framing = map_framing(host_doc)
 
     if regroup and view is not None and copied_pids:
-        panel_elements = map_framing(host_doc)
-        link_zones = map_framing_from_links(host_doc)
-        remaining_link = map_link_framing_by_container(host_doc)
-        _delete_groups_in_doc(host_doc, copied_pids)
-        gstats = combine_panels_group_color(
-            host_doc,
-            view,
-            copied_pids,
-            panel_elements,
-            link_zones,
-            link_framing=remaining_link,
-            tag_mep=True,
-        )
-        stats["host_groups"] = gstats.get("groups", 0)
-        stats["errors"].extend(gstats.get("group_errors", []))
+        try:
+            regroup_stats = regroup_panels_in_host(
+                host_doc, view, copied_pids, tag_mep=True
+            )
+            stats["host_groups"] = regroup_stats.get("groups", 0)
+            stats["errors"].extend(regroup_stats.get("group_errors", []))
+        except Exception as ex:
+            stats["errors"].append("Regroup: {}".format(ex))
 
+    stats["verify"] = verify_panel_copy(host_doc, copied_pids or selected)
     return stats
+
+
+def regroup_panels_in_host(host_doc, view, selected, tag_mep=True):
+    """Rebuild host panel groups (framing + MEP) after copy or regroup."""
+    panel_elements = map_framing(host_doc)
+    link_zones = map_framing_from_links(host_doc)
+    remaining_link = map_link_framing_by_container(host_doc)
+    _delete_groups_in_doc(host_doc, selected)
+    return combine_panels_group_color(
+        host_doc,
+        view,
+        selected,
+        panel_elements,
+        link_zones,
+        link_framing=remaining_link,
+        tag_mep=tag_mep,
+    )
+
+
+def verify_panel_copy(host_doc, panel_ids):
+    """Return per-panel copy status for UI / debugging."""
+    host_framing = map_framing(host_doc)
+    link_framing = map_link_framing_by_container(host_doc)
+    rows = []
+    for pid in panel_ids:
+        label = panel_display_name(pid)
+        host_count = len(merge_framing_for_panel(host_framing, pid))
+        link_count = len(merge_link_framing_for_panel(link_framing, pid))
+        has_group = False
+        for g in (
+            DB.FilteredElementCollector(host_doc)
+            .OfClass(DB.Group)
+            .ToElements()
+        ):
+            if group_matches_panel(g.Name, pid):
+                has_group = True
+                break
+        if host_count and has_group:
+            status = "OK — in host, grouped"
+        elif host_count:
+            status = "Partial — host framing, no group"
+        elif link_count:
+            status = "Not copied — still in link only"
+        else:
+            status = "Missing — no framing found"
+        rows.append({
+            "panel": label,
+            "host_framing": host_count,
+            "link_framing": link_count,
+            "host_group": has_group,
+            "status": status,
+        })
+    return rows
 
 
 def choose_panels(panel_ids):

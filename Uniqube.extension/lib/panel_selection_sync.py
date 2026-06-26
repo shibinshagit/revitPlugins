@@ -74,7 +74,7 @@ def detect_panel_from_selection(uidoc, host_doc):
         if el is None:
             continue
         if isinstance(el, DB.Group):
-            panels.append(el.Name)
+            panels.append(pu.panel_display_name(el.Name))
             continue
         c = _container_value(el)
         if c:
@@ -82,7 +82,7 @@ def detect_panel_from_selection(uidoc, host_doc):
             continue
         gname = _host_group_name_for_element(host_doc, el)
         if gname:
-            panels.append(gname)
+            panels.append(pu.panel_display_name(gname))
 
     invalid = DB.ElementId.InvalidElementId
     for ref in uidoc.Selection.GetReferences():
@@ -102,7 +102,7 @@ def detect_panel_from_selection(uidoc, host_doc):
         if elem is None:
             continue
         if isinstance(elem, DB.Group):
-            panels.append(elem.Name)
+            panels.append(pu.panel_display_name(elem.Name))
             continue
         c = _container_value(elem)
         if c:
@@ -168,8 +168,7 @@ def is_enabled():
 
 def enable(uidoc):
     global _uiapp, _idling_handler, _host_doc, _enabled, _last_fingerprint
-    if _enabled and _idling_handler is not None:
-        return True
+    disable(uidoc)
     _host_doc = uidoc.Document
     _uiapp = uidoc.Application
     _idling_handler = EventHandler[IdlingEventArgs](_on_idling)

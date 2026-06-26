@@ -11,10 +11,12 @@ def main():
     if now_on:
         forms.alert(
             "Panel selection sync is ON.\n\n"
-            "Click any panel stud, host MEP group, or MEP element — "
+            "Click any panel stud, host group, or MEP element — "
             "Revit will auto-select the full panel + MEP pair "
             "(same as Select Panel + MEP).\n\n"
-            "Click this button again to turn OFF.",
+            "After git pull / pyRevit Reload, click this button once "
+            "to turn sync back ON.\n\n"
+            "Click again to turn OFF.",
             title="UNIQUBE — Sync Panel Selection",
         )
     else:

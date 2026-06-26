@@ -124,11 +124,27 @@ def main():
     try:
         with revit.Transaction("UNIQUBE: Copy Panel to Host"):
             stats = pu.copy_panel_framing_to_host(
-                doc, view, selected, link_framing, regroup=True
+                doc, view, selected, link_framing, regroup=False
             )
     except Exception as ex:
         forms.alert("Copy failed:\n{}".format(ex), title="UNIQUBE")
         return
+
+    copied_pids = stats.get("copied_pids", [])
+    if stats.get("panels", 0) > 0 and copied_pids:
+        try:
+            with revit.Transaction("UNIQUBE: Regroup Panel + MEP"):
+                regroup = pu.regroup_panels_in_host(
+                    doc, view, copied_pids, tag_mep=True
+                )
+                stats["host_groups"] = regroup.get("groups", 0)
+                stats.setdefault("errors", []).extend(
+                    regroup.get("group_errors", [])
+                )
+        except Exception as ex:
+            stats.setdefault("errors", []).append("Regroup: {}".format(ex))
+
+    stats["verify"] = pu.verify_panel_copy(doc, selected)
 
     msg = (
         "Done.\n\n"
@@ -142,6 +158,16 @@ def main():
             stats.get("host_groups", 0),
         )
     )
+    verify = stats.get("verify", [])
+    if verify:
+        msg += "\n\nVerify:"
+        for row in verify[:8]:
+            msg += "\n  {} — {} (host: {}, link: {})".format(
+                row["panel"],
+                row["status"],
+                row["host_framing"],
+                row["link_framing"],
+            )
     skipped = stats.get("skipped", [])
     if skipped:
         msg += "\n\nSkipped:\n" + "\n".join(skipped[:8])
@@ -155,6 +181,12 @@ def main():
             "You can remove the structural link (Manage Links → Remove)."
         )
     forms.alert(msg, title="UNIQUBE — Copy Panel to Host")
+
+    try:
+        import panel_selection_sync as pss
+        pss.enable(uidoc)
+    except Exception:
+        pass
 
 
 main()
