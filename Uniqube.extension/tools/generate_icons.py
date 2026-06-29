@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
 """Generate UNIQUBE pyRevit ribbon icons from Fluent UI (via Iconify API).
 
-Icons: Microsoft Fluent UI System Icons (MIT) — https://github.com/microsoft/fluentui-system-icons
-Fetched through Iconify API for consistent 24px regular glyphs.
+Icons: Microsoft Fluent UI System Icons (MIT)
+https://github.com/microsoft/fluentui-system-icons
+
+Revit / pyRevit require PNG icons with 96 DPI metadata. Without it, buttons
+fall back to text initials (AP, BOM, ML, etc.).
 
 Usage:
     pip install -r tools/requirements-icons.txt
     python3 tools/generate_icons.py
-
-Output: icon.png + icon32.png (opaque RGB) in each pushbutton folder.
 """
 from __future__ import print_function
 
-import io
 import os
 import urllib.error
 import urllib.request
@@ -22,17 +22,17 @@ from PIL import Image, ImageDraw
 from svg.path import parse_path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SIZE = 32
-GLYPH = 20
+SIZE = 96
+GLYPH = 64
 PAD = (SIZE - GLYPH) // 2
 VIEW = 24.0
+DPI = (96, 96)
 
 BG = (26, 54, 93)
 BG_ACCENT = (0, 120, 120)
 ICONIFY = "https://api.iconify.design/fluent/{name}.svg?color=%23ffffff"
 CACHE = os.path.join(os.path.dirname(__file__), "icon_cache")
 
-# rel_path -> (fluent iconify slug, accent background)
 ICON_MAP = {
     "UNIQUBE.tab/MEP.panel/MEPGroupPanels.pushbutton": (
         "apps-list-24-regular", True
@@ -124,7 +124,6 @@ def _fetch_svg(slug):
 
 
 def _path_polygons(svg_bytes):
-    """Turn SVG path elements into filled polygons in 24x24 view space."""
     root = ET.fromstring(svg_bytes)
     polygons = []
     for elem in root.iter():
@@ -138,7 +137,7 @@ def _path_polygons(svg_bytes):
         flat = []
         for seg in parsed:
             length = max(getattr(seg, "length", lambda: 1.0)(), 0.01)
-            steps = max(int(length * 2), 4)
+            steps = max(int(length * 3), 6)
             for i in range(steps + 1):
                 pt = seg.point(i / float(steps))
                 flat.append((pt.real, pt.imag))
@@ -148,7 +147,6 @@ def _path_polygons(svg_bytes):
 
 
 def _render_glyph(svg_bytes):
-    """Rasterize SVG paths to a white-on-transparent GLYPH x GLYPH image."""
     scale = GLYPH / VIEW
     img = Image.new("RGBA", (GLYPH, GLYPH), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -162,7 +160,10 @@ def _compose(svg_bytes, accent=False):
     bg = BG_ACCENT if accent else BG
     canvas = Image.new("RGBA", (SIZE, SIZE), bg + (255,))
     draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle([1, 1, 30, 30], radius=6, fill=bg + (255,))
+    radius = SIZE // 5
+    draw.rounded_rectangle(
+        [2, 2, SIZE - 3, SIZE - 3], radius=radius, fill=bg + (255,)
+    )
     glyph = _render_glyph(svg_bytes)
     canvas.paste(glyph, (PAD, PAD), glyph)
     rgb = Image.new("RGB", (SIZE, SIZE), bg)
@@ -173,10 +174,9 @@ def _compose(svg_bytes, accent=False):
 def _save(rel_path, img):
     folder = os.path.join(ROOT, rel_path)
     os.makedirs(folder, exist_ok=True)
-    for name in ("icon.png", "icon32.png"):
-        path = os.path.join(folder, name)
-        img.save(path, "PNG")
-        print("wrote", path)
+    path = os.path.join(folder, "icon.png")
+    img.save(path, "PNG", dpi=DPI)
+    print("wrote", path, img.size, "dpi=96")
 
 
 def main():
@@ -192,7 +192,7 @@ def main():
     if errors:
         print("\n{} icon(s) failed.".format(len(errors)))
         raise SystemExit(1)
-    print("\nDone — {} Fluent UI icons.".format(len(ICON_MAP)))
+    print("\nDone — {} Fluent UI icons at 96x96 / 96 DPI.".format(len(ICON_MAP)))
 
 
 if __name__ == "__main__":
