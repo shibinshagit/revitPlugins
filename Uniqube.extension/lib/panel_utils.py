@@ -273,13 +273,57 @@ def _curve_fully_inside_panel(el, panel_outlines, pid):
     return _panels_matching(pid, start_p) and _panels_matching(pid, end_p)
 
 
-def _mep_belongs_in_panel(el, pid, panel_outlines):
+def _mep_belongs_in_panel(
+    el, pid, panel_outlines, host_assignments=None, valid_ids=None
+):
     """Host MEP fully inside panel framing (not outside connecting runs)."""
+    existing = _read_container_value(el)
+    if existing and panel_ids_match(existing, pid):
+        return True
+
     if isinstance(el, DB.MEPCurve):
         return _curve_fully_inside_panel(el, panel_outlines, pid)
+
     if _is_mep_connection(el):
-        return _panels_matching(pid, _location_panels(el, panel_outlines))
+        if _panels_matching(pid, _location_panels(el, panel_outlines)):
+            return True
+        if host_assignments is not None and valid_ids is not None:
+            return _fitting_serves_panel_run(
+                el, pid, host_assignments, panel_outlines, valid_ids
+            )
+        return False
+
     return _panels_matching(pid, _location_panels(el, panel_outlines))
+
+
+def _fitting_serves_panel_run(el, pid, host_assignments, panel_outlines, valid_ids):
+    """True when a fitting joins non-crossing runs assigned to this panel."""
+    for nb in _mep_network_neighbors(el, valid_ids):
+        if not isinstance(nb, DB.MEPCurve):
+            continue
+        if _curve_crosses_panel_boundary(nb, panel_outlines):
+            continue
+        if _curve_fully_inside_panel(nb, panel_outlines, pid):
+            return True
+        nb_pids = host_assignments.get(nb.Id, set())
+        if len(nb_pids) == 1 and panel_ids_match(list(nb_pids)[0], pid):
+            return True
+    return False
+
+
+def _mep_touches_panel_zone(
+    el, panel_outlines, host_assignments=None, valid_ids=None
+):
+    """Element is part of panel MEP (inside zone or on an inside panel run)."""
+    if _curve_touches_panel_zone(el, panel_outlines):
+        return True
+    if _is_mep_connection(el) and host_assignments is not None and valid_ids:
+        for nb in _mep_network_neighbors(el, valid_ids):
+            if isinstance(nb, DB.MEPCurve) and _curve_touches_panel_zone(
+                nb, panel_outlines
+            ):
+                return True
+    return False
 
 
 def _curve_crosses_panel_boundary(el, panel_outlines):
@@ -372,38 +416,66 @@ def _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids):
 
 
 def _is_panel_crossing_connection(el, host_assignments, panel_outlines, valid_ids):
-    """True for fittings or pipes that enter/exit a panel or join two panels."""
+    """True for pipes exiting a panel; fittings only when on exit-only runs."""
     if isinstance(el, DB.MEPCurve):
         return _curve_crosses_panel_boundary(el, panel_outlines)
 
-    if _is_mep_connection(el):
-        for nb in _mep_network_neighbors(el, valid_ids):
-            if isinstance(nb, DB.MEPCurve) and _curve_crosses_panel_boundary(
-                nb, panel_outlines
-            ):
-                return True
+    if not _is_mep_connection(el):
+        return False
 
-        has_inside = False
-        has_outside = False
-        panel_names = set()
-        for nb in _mep_network_neighbors(el, valid_ids):
-            if isinstance(nb, DB.MEPCurve):
-                sp, ep = _endpoint_panels(nb, panel_outlines)
-                if sp or ep:
-                    has_inside = True
-                    for p in sp | ep:
-                        panel_names.add(panel_display_name(p).lower())
-                else:
-                    has_outside = True
-        if has_inside and has_outside:
-            return True
-        if len(panel_names) > 1:
-            return True
+    has_crossing = False
+    has_inside = False
+    panel_names = set()
 
-        loc_panels = _location_panels(el, panel_outlines)
-        if loc_panels and has_outside:
-            return True
+    for nb in _mep_network_neighbors(el, valid_ids):
+        if not isinstance(nb, DB.MEPCurve):
+            continue
+        if _curve_crosses_panel_boundary(nb, panel_outlines):
+            has_crossing = True
+            continue
+        sp, ep = _endpoint_panels(nb, panel_outlines)
+        if sp or ep:
+            has_inside = True
+            for p in sp | ep:
+                panel_names.add(panel_display_name(p).lower())
+
+    # Couplings between inside-panel runs (pipe or conduit fittings).
+    if has_inside and not has_crossing:
+        return False
+
+    # Elbow/tee at panel exit: inside run + crossing run → panel fitting, not red.
+    if has_inside and has_crossing:
+        return False
+
+    if has_crossing:
+        return True
+
+    if len(panel_names) > 1:
+        return True
     return False
+
+
+def _assign_fittings_from_runs(doc, host_assignments, panel_outlines):
+    """Assign pipe/conduit fittings from connected inside-panel runs."""
+    valid_ids = set(eid.IntegerValue for eid in host_assignments.keys())
+    assigned = 0
+    for eid in list(host_assignments.keys()):
+        if host_assignments[eid]:
+            continue
+        el = doc.GetElement(eid)
+        if el is None or not _is_mep_connection(el):
+            continue
+        for nb in _mep_network_neighbors(el, valid_ids):
+            if not isinstance(nb, DB.MEPCurve):
+                continue
+            if _curve_crosses_panel_boundary(nb, panel_outlines):
+                continue
+            nb_pids = host_assignments.get(nb.Id, set())
+            if len(nb_pids) == 1:
+                host_assignments[eid] = set(nb_pids)
+                assigned += 1
+                break
+    return assigned
 
 
 def _count_crossing_connections(doc, host_assignments, panel_outlines):
@@ -794,10 +866,16 @@ def propagate_panel_assignments(doc, host_assignments, panel_outlines=None, max_
             el = get_elem(eid)
             if el is None:
                 continue
-            if panel_outlines and not _curve_touches_panel_zone(el, panel_outlines):
+            if panel_outlines and not _mep_touches_panel_zone(
+                el, panel_outlines, host_assignments, valid_ids
+            ):
                 continue
             if isinstance(el, DB.MEPCurve) and _curve_crosses_panel_boundary(
                 el, panel_outlines
+            ):
+                continue
+            if _is_mep_connection(el) and _is_panel_crossing_connection(
+                el, host_assignments, panel_outlines, valid_ids
             ):
                 continue
             conn_panels = neighbor_panels(eid)
@@ -902,7 +980,9 @@ def preview_mep_counts(doc, panel_elements, link_zones):
             continue
         if len(pids) == 1:
             pid = list(pids)[0]
-            if _mep_belongs_in_panel(el, pid, interior_outlines):
+            if _mep_belongs_in_panel(
+                el, pid, interior_outlines, mep_assignments, valid_ids
+            ):
                 counts[pid] = counts.get(pid, 0) + 1
     return counts
 
@@ -1082,6 +1162,12 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
     stats["propagated"] += propagate_panel_assignments(
         doc, host_assignments, interior_outlines
     )
+    stats["fitting_assigned"] = _assign_fittings_from_runs(
+        doc, host_assignments, interior_outlines
+    )
+    stats["fitting_assigned"] += _assign_fittings_from_runs(
+        doc, host_assignments, interior_outlines
+    )
 
     return host_assignments, link_assignments, stats, spatial_assignments
 
@@ -1137,7 +1223,9 @@ def fill_mep_bimsf_containers(
                 stats["cleared_crossing"] += 1
             continue
 
-        if not _curve_touches_panel_zone(el, interior_outlines):
+        if not _mep_touches_panel_zone(
+            el, interior_outlines, mep_assignments, valid_ids
+        ):
             if _read_container_value(el) and _clear_container(el):
                 stats["cleared_outside"] += 1
             stats["unassigned"] += 1
@@ -1157,7 +1245,9 @@ def fill_mep_bimsf_containers(
             stats["unassigned"] += 1
             continue
 
-        if not _mep_belongs_in_panel(el, pid, interior_outlines):
+        if not _mep_belongs_in_panel(
+            el, pid, interior_outlines, mep_assignments, valid_ids
+        ):
             if _read_container_value(el) and _clear_container(el):
                 stats["cleared_outside"] += 1
             stats["unassigned"] += 1
@@ -1614,7 +1704,9 @@ def combine_panels_group_color(
                     _clear_container(el)
                 continue
             if _assignment_matches_panel(pids, pid):
-                if not _mep_belongs_in_panel(el, pid, interior_outlines):
+                if not _mep_belongs_in_panel(
+                    el, pid, interior_outlines, mep_assignments, valid_ids
+                ):
                     continue
                 if eid_int not in added_to_group:
                     added_to_group.add(eid_int)
