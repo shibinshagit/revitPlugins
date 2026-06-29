@@ -39,7 +39,7 @@ def main():
                     except Exception:
                         pass
 
-        mep_assignments, link_assignments, link_stats = pu.assign_mep_to_panels(
+        mep_assignments, link_assignments, link_stats, _ = pu.assign_mep_to_panels(
             doc, panel_elements, link_zones
         )
 

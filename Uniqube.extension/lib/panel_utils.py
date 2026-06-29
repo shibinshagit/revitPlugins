@@ -660,11 +660,13 @@ def map_framing_link_sources(doc):
 
 def preview_mep_counts(doc, panel_elements, link_zones):
     """Return {panel_id: host_mep_count} for elements in exactly one panel."""
-    mep_assignments, _, _ = assign_mep_to_panels(
+    mep_assignments, _, _, spatial = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
     counts = {pid: 0 for pid in get_all_panel_ids(panel_elements, link_zones)}
-    for _eid, pids in mep_assignments.items():
+    for eid, pids in mep_assignments.items():
+        if len(spatial.get(eid, set())) > 1:
+            continue
         if len(pids) == 1:
             pid = list(pids)[0]
             counts[pid] = counts.get(pid, 0) + 1
@@ -673,10 +675,10 @@ def preview_mep_counts(doc, panel_elements, link_zones):
 
 def preview_crossing_mep(doc, panel_elements, link_zones):
     """Return count of host MEP elements assigned to more than one panel."""
-    mep_assignments, _, _ = assign_mep_to_panels(
+    _, _, _, spatial = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
-    return sum(1 for pids in mep_assignments.values() if len(pids) > 1)
+    return sum(1 for pids in spatial.values() if len(pids) > 1)
 
 
 def build_panel_catalog(doc):
@@ -830,6 +832,9 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
                 stats["link_matched"] += 1
 
     known_pids = list(all_pids)
+    spatial_assignments = {
+        eid: set(pids) for eid, pids in host_assignments.items()
+    }
     stats["curve_refined"] = _refine_curve_assignments(
         doc, host_assignments, panel_outlines
     )
@@ -837,7 +842,7 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
     stats["propagated"] = propagate_panel_assignments(doc, host_assignments)
     stats["propagated"] += propagate_panel_assignments(doc, host_assignments)
 
-    return host_assignments, link_assignments, stats
+    return host_assignments, link_assignments, stats, spatial_assignments
 
 
 def fill_mep_bimsf_containers(
@@ -865,7 +870,7 @@ def fill_mep_bimsf_containers(
         "propagated": 0,
         "resolved": 0,
     }
-    mep_assignments, _, assign_stats = assign_mep_to_panels(
+    mep_assignments, _, assign_stats, spatial_assignments = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
     stats["propagated"] = assign_stats.get("propagated", 0)
@@ -882,10 +887,16 @@ def fill_mep_bimsf_containers(
                 stats["cleared_bends"] += 1
             continue
 
+        spatial_pids = spatial_assignments.get(eid, set())
+        if len(spatial_pids) > 1:
+            if clear_crossings and _clear_container(el):
+                stats["cleared_crossing"] += 1
+            continue
+
         pid = None
         if len(pids) == 1:
             pid = list(pids)[0]
-        elif len(pids) == 0 or len(pids) > 1:
+        elif len(pids) == 0:
             pid = _resolve_panel_for_element(
                 el, mep_assignments, panel_outlines, pids
             )
@@ -893,10 +904,7 @@ def fill_mep_bimsf_containers(
                 stats["resolved"] += 1
 
         if not pid:
-            if len(pids) > 1 and clear_crossings and _clear_container(el):
-                stats["cleared_crossing"] += 1
-            elif len(pids) == 0:
-                stats["unassigned"] += 1
+            stats["unassigned"] += 1
             continue
 
         if not _panel_in_selection(pid, selected):
@@ -1297,8 +1305,8 @@ def combine_panels_group_color(
     if link_framing is None:
         link_framing = map_link_framing_by_container(doc)
 
-    mep_assignments, link_assignments, link_stats = assign_mep_to_panels(
-        doc, panel_elements, link_zones
+    mep_assignments, link_assignments, link_stats, spatial_assignments = (
+        assign_mep_to_panels(doc, panel_elements, link_zones)
     )
     red_settings, panel_settings = _view_color_kit(doc)
 
@@ -1337,6 +1345,16 @@ def combine_panels_group_color(
             if el is None:
                 continue
             eid_int = eid.IntegerValue
+            spatial_pids = spatial_assignments.get(eid, set())
+            if len(spatial_pids) > 1:
+                if _assignment_crosses_panel(spatial_pids, pid):
+                    view.SetElementOverrides(eid, red_settings)
+                    if eid not in processed_crossings:
+                        processed_crossings.add(eid)
+                        stats["crossing_count"] += 1
+                    if tag_mep:
+                        _clear_container(el)
+                continue
             if _assignment_matches_panel(pids, pid):
                 if eid_int not in added_to_group:
                     added_to_group.add(eid_int)
@@ -1345,18 +1363,6 @@ def combine_panels_group_color(
                 if tag_mep:
                     set_panel_labels(el, pid)
                     stats["mep_tagged"] += 1
-            elif _assignment_crosses_panel(pids, pid):
-                view.SetElementOverrides(eid, red_settings)
-                if eid not in processed_crossings:
-                    processed_crossings.add(eid)
-                    stats["crossing_count"] += 1
-                if tag_mep:
-                    p = el.LookupParameter(PARAM_NAME)
-                    if p and not p.IsReadOnly:
-                        try:
-                            p.Set("")
-                        except Exception:
-                            pass
 
         for link_inst, elem, pids in link_assignments:
             is_framing = (
@@ -1466,6 +1472,18 @@ def _flatten_copied_elements(host_doc, element_ids):
     return result, exploded
 
 
+def _remove_host_framing_for_panel(host_doc, pid):
+    """Delete copied host framing for one panel so link copy can run again."""
+    removed = 0
+    for el in merge_framing_for_panel(map_framing(host_doc), pid):
+        try:
+            host_doc.Delete(el.Id)
+            removed += 1
+        except Exception:
+            pass
+    return removed
+
+
 def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regroup=True):
     """Copy linked panel framing into the host, explode groups, regroup with MEP.
 
@@ -1502,11 +1520,10 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
             stats["skipped"].append("{} (no link framing)".format(label))
             continue
 
-        if merge_framing_for_panel(host_framing, pid):
-            stats["skipped"].append(
-                "{} (host framing already exists)".format(label)
-            )
-            continue
+        host_count = len(merge_framing_for_panel(host_framing, pid))
+        if host_count > 0:
+            _remove_host_framing_for_panel(host_doc, pid)
+            host_framing = map_framing(host_doc)
 
         by_link = {}
         for link_inst, elem in pairs:
