@@ -25,11 +25,24 @@ def _base(accent=False):
     return img, d
 
 
+def _flatten(img):
+    """Revit ribbon icons must be opaque RGB — transparent PNGs may not show."""
+    out = Image.new("RGB", (SIZE, SIZE), BG)
+    if img.mode == "RGBA":
+        out.paste(img, (0, 0), img)
+    else:
+        out.paste(img, (0, 0))
+    return out
+
+
 def _save(rel_path, img):
-    path = os.path.join(ROOT, rel_path, "icon.png")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    img.save(path, "PNG")
-    print("wrote", path)
+    folder = os.path.join(ROOT, rel_path)
+    os.makedirs(folder, exist_ok=True)
+    flat = _flatten(img)
+    for name in ("icon.png", "icon32.png"):
+        path = os.path.join(folder, name)
+        flat.save(path, "PNG")
+        print("wrote", path)
 
 
 def icon_prepare_mep():
@@ -178,11 +191,13 @@ def icon_position_id():
 
 
 def icon_master_list():
-    img, d = _base()
-    d.rectangle([6, 5, 26, 27], outline=FG, width=1)
-    for y in (10, 14, 18, 22):
-        d.line([8, y, 24, y], fill=FG_DIM, width=1)
-    d.rectangle([8, 7, 12, 9], fill=AMBER)
+    img, d = _base(accent=True)
+    d.rectangle([5, 4, 27, 28], outline=FG, width=2)
+    d.line([5, 10, 27, 10], fill=FG, width=2)
+    d.line([12, 4, 12, 28], fill=FG_DIM, width=1)
+    for y in (14, 18, 23):
+        d.line([14, y, 26, y], fill=FG, width=1)
+    d.rectangle([7, 6, 11, 9], fill=AMBER)
     return img
 
 
