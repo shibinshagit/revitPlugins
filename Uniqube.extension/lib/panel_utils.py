@@ -344,6 +344,23 @@ def _curve_crosses_panel_boundary(el, panel_outlines):
         end_names = {panel_display_name(p).lower() for p in end_p}
         if start_names != end_names:
             return True
+
+    # Both endpoints inside — check mid-span still inside (top/bottom exit).
+    if start_in and end_in and start_p == end_p:
+        loc = el.Location
+        if isinstance(loc, DB.LocationCurve):
+            curve = loc.Curve
+            if curve is not None:
+                pid = list(start_p)[0]
+                outline = panel_outlines.get(pid)
+                if outline is not None:
+                    for t in (0.25, 0.5, 0.75):
+                        try:
+                            pt = curve.Evaluate(t, True)
+                        except Exception:
+                            continue
+                        if not _point_in_outline(pt, outline):
+                            return True
     return False
 
 
@@ -592,7 +609,9 @@ def map_framing_from_links(doc):
                 t_max = transform.OfPoint(bbox.Max)
                 if pid not in link_zones:
                     link_zones[pid] = []
-                link_zones[pid].append((t_min, t_max))
+                link_zones[pid].append(
+                    (t_min, t_max, _framing_is_horizontal(beam))
+                )
     return link_zones
 
 
@@ -639,38 +658,91 @@ def get_all_panel_ids(panel_elements, link_zones=None):
     return ids
 
 
+def _framing_is_horizontal(elem):
+    """True for tracks / sills (used for panel top and bottom Z limits)."""
+    try:
+        loc = elem.Location
+        if isinstance(loc, DB.LocationCurve):
+            curve = loc.Curve
+            if curve is None:
+                return False
+            p0 = curve.GetEndPoint(0)
+            p1 = curve.GetEndPoint(1)
+            dx = p1.X - p0.X
+            dy = p1.Y - p0.Y
+            dz = abs(p1.Z - p0.Z)
+            run = (dx * dx + dy * dy) ** 0.5
+            return run > 0.01 and dz / run < 0.35
+    except Exception:
+        pass
+    return False
+
+
 def compute_panel_bbox(elements, link_bboxes=None):
-    """Compute combined bounding box for a panel's framing + link bboxes."""
-    min_pt = DB.XYZ(10000, 10000, 10000)
-    max_pt = DB.XYZ(-10000, -10000, -10000)
+    """Panel bounds: XY from all framing; Z from horizontal tracks only.
+
+    Vertical studs often extend past top/bottom tracks. Using stud tips for Z
+    kept pipes above the top track inside the panel zone (missing red crossing).
+    """
+    xy_min = DB.XYZ(10000, 10000, 0)
+    xy_max = DB.XYZ(-10000, -10000, 0)
+    track_z_min = []
+    track_z_max = []
+    fallback_z_min = []
+    fallback_z_max = []
 
     for el in elements:
         bbox = el.get_BoundingBox(None)
-        if bbox:
-            min_pt = DB.XYZ(
-                min(min_pt.X, bbox.Min.X),
-                min(min_pt.Y, bbox.Min.Y),
-                min(min_pt.Z, bbox.Min.Z),
-            )
-            max_pt = DB.XYZ(
-                max(max_pt.X, bbox.Max.X),
-                max(max_pt.Y, bbox.Max.Y),
-                max(max_pt.Z, bbox.Max.Z),
-            )
+        if bbox is None:
+            continue
+        xy_min = DB.XYZ(
+            min(xy_min.X, bbox.Min.X),
+            min(xy_min.Y, bbox.Min.Y),
+            xy_min.Z,
+        )
+        xy_max = DB.XYZ(
+            max(xy_max.X, bbox.Max.X),
+            max(xy_max.Y, bbox.Max.Y),
+            xy_max.Z,
+        )
+        fallback_z_min.append(bbox.Min.Z)
+        fallback_z_max.append(bbox.Max.Z)
+        if _framing_is_horizontal(el):
+            track_z_min.append(bbox.Min.Z)
+            track_z_max.append(bbox.Max.Z)
 
     if link_bboxes:
-        for bb_min, bb_max in link_bboxes:
-            min_pt = DB.XYZ(
-                min(min_pt.X, bb_min.X),
-                min(min_pt.Y, bb_min.Y),
-                min(min_pt.Z, bb_min.Z),
+        for item in link_bboxes:
+            if len(item) >= 3:
+                bb_min, bb_max, is_horiz = item[0], item[1], item[2]
+            else:
+                bb_min, bb_max = item[0], item[1]
+                is_horiz = False
+            xy_min = DB.XYZ(
+                min(xy_min.X, bb_min.X),
+                min(xy_min.Y, bb_min.Y),
+                xy_min.Z,
             )
-            max_pt = DB.XYZ(
-                max(max_pt.X, bb_max.X),
-                max(max_pt.Y, bb_max.Y),
-                max(max_pt.Z, bb_max.Z),
+            xy_max = DB.XYZ(
+                max(xy_max.X, bb_max.X),
+                max(xy_max.Y, bb_max.Y),
+                xy_max.Z,
             )
+            fallback_z_min.append(bb_min.Z)
+            fallback_z_max.append(bb_max.Z)
+            if is_horiz:
+                track_z_min.append(bb_min.Z)
+                track_z_max.append(bb_max.Z)
 
+    if track_z_min:
+        z0 = min(track_z_min)
+        z1 = max(track_z_max)
+    else:
+        z0 = min(fallback_z_min) if fallback_z_min else 0
+        z1 = max(fallback_z_max) if fallback_z_max else 0
+
+    min_pt = DB.XYZ(xy_min.X, xy_min.Y, z0)
+    max_pt = DB.XYZ(xy_max.X, xy_max.Y, z1)
     return min_pt, max_pt
 
 
