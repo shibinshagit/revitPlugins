@@ -80,7 +80,7 @@ ICON_MAP = {
         "number-symbol-24-regular", False
     ),
     "UNIQUBE.tab/Structural.panel/MasterPanelList.pushbutton": (
-        "table-24-regular", True
+        "clipboard-task-24-regular", True
     ),
     "UNIQUBE.tab/Structural.panel/BOMExtraction.pushbutton": (
         "document-table-24-regular", False
