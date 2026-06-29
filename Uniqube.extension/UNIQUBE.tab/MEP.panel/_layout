@@ -1,6 +1,5 @@
 MEPGroupPanels
-SyncPanelSelection
 FillMEPContainers
-ConduitFittingSched
-ElecFixtureSched
-PipeFittingSched
+SyncPanelSelection
+---
+MEPSchedules

@@ -1,1 +1,9 @@
 title: MEP
+tooltip: MEP panel grouping, BIMSF tagging, schedules, and selection sync.
+author: Uniqube
+layout:
+  - MEPGroupPanels
+  - FillMEPContainers
+  - SyncPanelSelection
+  - -----
+  - MEPSchedules

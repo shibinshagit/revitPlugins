@@ -1,4 +1,4 @@
-title: Prepare MEP Panels
+title: "Prepare\nMEP Panels"
 tooltip: >-
   One step: auto-fill BIMSF_Container on MEP, group panels, copy linked
   framing into host, regroup panel + MEP, and turn on click-to-select sync.

@@ -1,4 +1,4 @@
-title: Fill BIMSF Container
+title: "Fill\nBIMSF"
 tooltip: >-
   Auto-fill BIMSF_Container on pipes, conduits, fittings, fixtures, and other
   MEP inside each panel zone. Clears crossing elements and conduit bends.

@@ -1,12 +1,8 @@
-SetupBIMSF
-IFCPanelMapper
-GroupPanels
-UngroupPanels
-PanelCombineColor
-PanelCombineAssembly
-CreateAssemblies
-AssemblyShopDrawing
+PanelSetup
+---
+PanelGrouping
+PanelAssembly
+---
 AdvancePositionID
->>>
 MasterPanelList
 BOMExtraction

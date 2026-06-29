@@ -1,1 +1,12 @@
 title: Structural
+tooltip: BIMSF panel setup, grouping, assemblies, and reporting tools.
+author: Uniqube
+layout:
+  - PanelSetup
+  - -----
+  - PanelGrouping
+  - PanelAssembly
+  - -----
+  - AdvancePositionID
+  - MasterPanelList
+  - BOMExtraction
