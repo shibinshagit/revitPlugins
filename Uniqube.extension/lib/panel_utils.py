@@ -257,19 +257,30 @@ def _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids):
 
 
 def _is_panel_crossing_connection(el, host_assignments, panel_outlines, valid_ids):
-    """True when a fitting connects MEP runs in two different panels."""
-    if not _is_mep_connection(el):
-        return False
-    panels = _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids)
-    names = set()
-    for p in panels:
-        if p:
-            names.add(panel_display_name(p).lower())
-    return len(names) > 1
+    """True for fittings or pipe/conduit segments that join two different panels."""
+    if _is_mep_connection(el):
+        panels = _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids)
+        names = set()
+        for p in panels:
+            if p:
+                names.add(panel_display_name(p).lower())
+        return len(names) > 1
+
+    if isinstance(el, DB.MEPCurve):
+        start_p, end_p = _endpoint_panels(el, panel_outlines)
+        start_names = {
+            panel_display_name(p).lower() for p in start_p if p
+        }
+        end_names = {
+            panel_display_name(p).lower() for p in end_p if p
+        }
+        if len(start_names) == 1 and len(end_names) == 1:
+            return start_names != end_names
+    return False
 
 
 def _count_crossing_connections(doc, host_assignments, panel_outlines):
-    """Count fittings that join two different panels."""
+    """Count fittings and connecting pipes/conduits that join two different panels."""
     valid_ids = set(eid.IntegerValue for eid in host_assignments.keys())
     count = 0
     for eid in host_assignments:
@@ -746,7 +757,7 @@ def preview_mep_counts(doc, panel_elements, link_zones):
 
 
 def preview_crossing_mep(doc, panel_elements, link_zones):
-    """Return count of panel-crossing connections (fittings between two panels)."""
+    """Return count of panel-crossing connections and connecting pipe segments."""
     mep_assignments, _, _, _ = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
@@ -1375,7 +1386,7 @@ def combine_panels_group_color(
 
     Host framing and MEP go into Revit groups. Linked panel framing is
     colored in the active view and should be grouped in the link file via
-    group_link_panel_framing(). Panel-crossing connections (fittings) red.
+    group_link_panel_framing(). Panel-crossing fittings and connecting pipes red.
     """
     if link_framing is None:
         link_framing = map_link_framing_by_container(doc)
