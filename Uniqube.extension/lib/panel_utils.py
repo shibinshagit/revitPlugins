@@ -125,6 +125,15 @@ MEP_CATS = [
 
 BEND_OR_FITTING_PARAM = "Bend or Fitting"
 
+FITTING_CATS = set([
+    DB.BuiltInCategory.OST_ConduitFitting,
+    DB.BuiltInCategory.OST_PipeFitting,
+    DB.BuiltInCategory.OST_CableTrayFitting,
+    DB.BuiltInCategory.OST_DuctFitting,
+    DB.BuiltInCategory.OST_PipeAccessory,
+    DB.BuiltInCategory.OST_DuctAccessory,
+])
+
 # Host + link spatial assignment for panel grouping workflows.
 LINK_ASSIGN_CATS = MEP_CATS + [DB.BuiltInCategory.OST_StructuralFraming]
 
@@ -216,6 +225,62 @@ def _refine_curve_assignments(doc, host_assignments, panel_outlines):
             host_assignments[eid] = set([chosen])
             refined += 1
     return refined
+
+
+def _is_mep_connection(el):
+    """True for fittings / accessories that join MEP runs (panel crossing points)."""
+    cat = el.Category
+    if cat is None:
+        return False
+    try:
+        return cat.BuiltInCategory in FITTING_CATS
+    except Exception:
+        return False
+
+
+def _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids):
+    """Panel ids reached from one element via connectors or curve endpoints."""
+    panels = set()
+    for nb in _mep_network_neighbors(el, valid_ids):
+        nb_pids = host_assignments.get(nb.Id, set())
+        if len(nb_pids) == 1:
+            panels.add(list(nb_pids)[0])
+        elif isinstance(nb, DB.MEPCurve):
+            start_p, end_p = _endpoint_panels(nb, panel_outlines)
+            panels.update(start_p)
+            panels.update(end_p)
+    if isinstance(el, DB.MEPCurve):
+        start_p, end_p = _endpoint_panels(el, panel_outlines)
+        panels.update(start_p)
+        panels.update(end_p)
+    return panels
+
+
+def _is_panel_crossing_connection(el, host_assignments, panel_outlines, valid_ids):
+    """True when a fitting connects MEP runs in two different panels."""
+    if not _is_mep_connection(el):
+        return False
+    panels = _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids)
+    names = set()
+    for p in panels:
+        if p:
+            names.add(panel_display_name(p).lower())
+    return len(names) > 1
+
+
+def _count_crossing_connections(doc, host_assignments, panel_outlines):
+    """Count fittings that join two different panels."""
+    valid_ids = set(eid.IntegerValue for eid in host_assignments.keys())
+    count = 0
+    for eid in host_assignments:
+        el = doc.GetElement(eid)
+        if el is None:
+            continue
+        if _is_panel_crossing_connection(
+            el, host_assignments, panel_outlines, valid_ids
+        ):
+            count += 1
+    return count
 
 
 def _resolve_panel_for_element(el, host_assignments, panel_outlines, spatial_pids):
@@ -663,9 +728,16 @@ def preview_mep_counts(doc, panel_elements, link_zones):
     mep_assignments, _, _, spatial = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
+    panel_outlines = _build_panel_outlines(panel_elements, link_zones)
+    valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
     counts = {pid: 0 for pid in get_all_panel_ids(panel_elements, link_zones)}
     for eid, pids in mep_assignments.items():
-        if len(spatial.get(eid, set())) > 1:
+        el = doc.GetElement(eid)
+        if el is None:
+            continue
+        if _is_panel_crossing_connection(
+            el, mep_assignments, panel_outlines, valid_ids
+        ):
             continue
         if len(pids) == 1:
             pid = list(pids)[0]
@@ -674,11 +746,12 @@ def preview_mep_counts(doc, panel_elements, link_zones):
 
 
 def preview_crossing_mep(doc, panel_elements, link_zones):
-    """Return count of host MEP elements assigned to more than one panel."""
-    _, _, _, spatial = assign_mep_to_panels(
+    """Return count of panel-crossing connections (fittings between two panels)."""
+    mep_assignments, _, _, _ = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
-    return sum(1 for pids in spatial.values() if len(pids) > 1)
+    panel_outlines = _build_panel_outlines(panel_elements, link_zones)
+    return _count_crossing_connections(doc, mep_assignments, panel_outlines)
 
 
 def build_panel_catalog(doc):
@@ -876,6 +949,7 @@ def fill_mep_bimsf_containers(
     stats["propagated"] = assign_stats.get("propagated", 0)
     panel_outlines = _build_panel_outlines(panel_elements, link_zones)
     known_pids = list(get_all_panel_ids(panel_elements, link_zones))
+    valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
 
     for eid, pids in mep_assignments.items():
         el = doc.GetElement(eid)
@@ -887,8 +961,9 @@ def fill_mep_bimsf_containers(
                 stats["cleared_bends"] += 1
             continue
 
-        spatial_pids = spatial_assignments.get(eid, set())
-        if len(spatial_pids) > 1:
+        if _is_panel_crossing_connection(
+            el, mep_assignments, panel_outlines, valid_ids
+        ):
             if clear_crossings and _clear_container(el):
                 stats["cleared_crossing"] += 1
             continue
@@ -896,7 +971,7 @@ def fill_mep_bimsf_containers(
         pid = None
         if len(pids) == 1:
             pid = list(pids)[0]
-        elif len(pids) == 0:
+        elif len(pids) == 0 or len(pids) > 1:
             pid = _resolve_panel_for_element(
                 el, mep_assignments, panel_outlines, pids
             )
@@ -1300,7 +1375,7 @@ def combine_panels_group_color(
 
     Host framing and MEP go into Revit groups. Linked panel framing is
     colored in the active view and should be grouped in the link file via
-    group_link_panel_framing(). Crossing MEP is marked red.
+    group_link_panel_framing(). Panel-crossing connections (fittings) red.
     """
     if link_framing is None:
         link_framing = map_link_framing_by_container(doc)
@@ -1308,6 +1383,8 @@ def combine_panels_group_color(
     mep_assignments, link_assignments, link_stats, spatial_assignments = (
         assign_mep_to_panels(doc, panel_elements, link_zones)
     )
+    panel_outlines = _build_panel_outlines(panel_elements, link_zones)
+    valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
     red_settings, panel_settings = _view_color_kit(doc)
 
     stats = {
@@ -1345,15 +1422,15 @@ def combine_panels_group_color(
             if el is None:
                 continue
             eid_int = eid.IntegerValue
-            spatial_pids = spatial_assignments.get(eid, set())
-            if len(spatial_pids) > 1:
-                if _assignment_crosses_panel(spatial_pids, pid):
+            if _is_panel_crossing_connection(
+                el, mep_assignments, panel_outlines, valid_ids
+            ):
+                if eid not in processed_crossings:
                     view.SetElementOverrides(eid, red_settings)
-                    if eid not in processed_crossings:
-                        processed_crossings.add(eid)
-                        stats["crossing_count"] += 1
-                    if tag_mep:
-                        _clear_container(el)
+                    processed_crossings.add(eid)
+                    stats["crossing_count"] += 1
+                if tag_mep:
+                    _clear_container(el)
                 continue
             if _assignment_matches_panel(pids, pid):
                 if eid_int not in added_to_group:
@@ -1374,7 +1451,11 @@ def combine_panels_group_color(
                 continue
             if _assignment_matches_panel(pids, pid):
                 set_link_element_override(view, link_inst, elem, settings)
-            elif _assignment_crosses_panel(pids, pid):
+            elif (
+                _is_mep_connection(elem)
+                and len(pids) > 1
+                and _assignment_crosses_panel(pids, pid)
+            ):
                 set_link_element_override(view, link_inst, elem, red_settings)
                 stats["crossing_count"] += 1
 
