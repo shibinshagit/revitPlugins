@@ -137,7 +137,8 @@ FITTING_CATS = set([
 # Host + link spatial assignment for panel grouping workflows.
 LINK_ASSIGN_CATS = MEP_CATS + [DB.BuiltInCategory.OST_StructuralFraming]
 
-ZONE_PAD_FT = 1.0
+ZONE_PAD_FT = 0.25
+INTERIOR_TOL_FT = 0.05
 
 
 def canonical_panel_id(pid, known_pids):
@@ -151,7 +152,13 @@ def canonical_panel_id(pid, known_pids):
 
 
 def _build_panel_outlines(panel_elements, link_zones):
-    outlines = {}
+    """Return (query_outlines, interior_outlines).
+
+    query_outlines — padded bbox for spatial collectors.
+    interior_outlines — tight framing bounds for inside/crossing tests.
+    """
+    query_outlines = {}
+    interior_outlines = {}
     all_pids = get_all_panel_ids(panel_elements, link_zones)
     for pid in all_pids:
         host_elems = merge_framing_for_panel(panel_elements, pid)
@@ -167,8 +174,9 @@ def _build_panel_outlines(panel_elements, link_zones):
                         lz = link_zones[key]
                         break
         min_pt, max_pt = compute_panel_bbox(host_elems, lz)
-        outlines[pid] = _panel_outline(min_pt, max_pt)
-    return outlines
+        query_outlines[pid] = _panel_outline(min_pt, max_pt)
+        interior_outlines[pid] = _interior_outline(min_pt, max_pt)
+    return query_outlines, interior_outlines
 
 
 def _point_in_outline(pt, outline):
@@ -251,6 +259,27 @@ def _curve_touches_panel_zone(el, panel_outlines):
         return bool(_location_panels(el, panel_outlines))
     start_p, end_p = _endpoint_panels(el, panel_outlines)
     return bool(start_p or end_p)
+
+
+def _panels_matching(pid, panel_set):
+    return any(panel_ids_match(pid, p) for p in panel_set)
+
+
+def _curve_fully_inside_panel(el, panel_outlines, pid):
+    """True when both curve endpoints lie inside the given panel volume."""
+    if not isinstance(el, DB.MEPCurve):
+        return _panels_matching(pid, _location_panels(el, panel_outlines))
+    start_p, end_p = _endpoint_panels(el, panel_outlines)
+    return _panels_matching(pid, start_p) and _panels_matching(pid, end_p)
+
+
+def _mep_belongs_in_panel(el, pid, panel_outlines):
+    """Host MEP fully inside panel framing (not outside connecting runs)."""
+    if isinstance(el, DB.MEPCurve):
+        return _curve_fully_inside_panel(el, panel_outlines, pid)
+    if _is_mep_connection(el):
+        return _panels_matching(pid, _location_panels(el, panel_outlines))
+    return _panels_matching(pid, _location_panels(el, panel_outlines))
 
 
 def _curve_crosses_panel_boundary(el, panel_outlines):
@@ -578,6 +607,12 @@ def _panel_outline(min_pt, max_pt):
     return DB.Outline(min_pt.Subtract(pad), max_pt.Add(pad))
 
 
+def _interior_outline(min_pt, max_pt):
+    """Tight panel volume aligned to framing — no large outside bleed."""
+    tol = DB.XYZ(INTERIOR_TOL_FT, INTERIOR_TOL_FT, INTERIOR_TOL_FT)
+    return DB.Outline(min_pt.Subtract(tol), max_pt.Add(tol))
+
+
 def _bbox_intersects_outline(bbox, outline):
     if bbox is None:
         return False
@@ -779,7 +814,7 @@ def propagate_panel_assignments(doc, host_assignments, panel_outlines=None, max_
 
 
 def _append_bimsf_param_assignments(doc, panel_outlines, host_assignments):
-    """Assign any host element with BIMSF_Container inside a panel zone."""
+    """Assign host elements with BIMSF_Container that lie inside panel framing."""
     for pid, outline in panel_outlines.items():
         nearby = (
             DB.FilteredElementCollector(doc)
@@ -795,6 +830,11 @@ def _append_bimsf_param_assignments(doc, panel_outlines, host_assignments):
                 continue
             p = item.LookupParameter(PARAM_NAME)
             if p is None:
+                continue
+            if isinstance(item, DB.MEPCurve):
+                if not _curve_touches_panel_zone(item, panel_outlines):
+                    continue
+            elif not _location_panels(item, panel_outlines):
                 continue
             if item.Id not in host_assignments:
                 host_assignments[item.Id] = set()
@@ -849,7 +889,7 @@ def preview_mep_counts(doc, panel_elements, link_zones):
     mep_assignments, _, _, spatial = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
-    panel_outlines = _build_panel_outlines(panel_elements, link_zones)
+    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
     valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
     counts = {pid: 0 for pid in get_all_panel_ids(panel_elements, link_zones)}
     for eid, pids in mep_assignments.items():
@@ -857,12 +897,13 @@ def preview_mep_counts(doc, panel_elements, link_zones):
         if el is None:
             continue
         if _is_panel_crossing_connection(
-            el, mep_assignments, panel_outlines, valid_ids
+            el, mep_assignments, interior_outlines, valid_ids
         ):
             continue
         if len(pids) == 1:
             pid = list(pids)[0]
-            counts[pid] = counts.get(pid, 0) + 1
+            if _mep_belongs_in_panel(el, pid, interior_outlines):
+                counts[pid] = counts.get(pid, 0) + 1
     return counts
 
 
@@ -871,8 +912,8 @@ def preview_crossing_mep(doc, panel_elements, link_zones):
     mep_assignments, _, _, _ = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
-    panel_outlines = _build_panel_outlines(panel_elements, link_zones)
-    return _count_crossing_connections(doc, mep_assignments, panel_outlines)
+    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
+    return _count_crossing_connections(doc, mep_assignments, interior_outlines)
 
 
 def build_panel_catalog(doc):
@@ -963,9 +1004,11 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
         host_assignments[item.Id] = set()
 
     all_pids = get_all_panel_ids(panel_elements, link_zones)
-    panel_outlines = _build_panel_outlines(panel_elements, link_zones)
+    query_outlines, interior_outlines = _build_panel_outlines(
+        panel_elements, link_zones
+    )
 
-    for pid, outline in panel_outlines.items():
+    for pid, outline in query_outlines.items():
         nearby = (
             DB.FilteredElementCollector(doc)
             .WherePasses(mep_filter)
@@ -976,7 +1019,7 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
             if item.Id in host_assignments:
                 host_assignments[item.Id].add(pid)
 
-    _append_bimsf_param_assignments(doc, panel_outlines, host_assignments)
+    _append_bimsf_param_assignments(doc, interior_outlines, host_assignments)
 
     link_assignments = []
     stats = {"link_matched": 0}
@@ -1017,7 +1060,7 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
                         ):
                             matched.add(pid)
                 else:
-                    for pid, outline in panel_outlines.items():
+                    for pid, outline in interior_outlines.items():
                         if _link_bbox_in_outline(elem, transform, outline):
                             matched.add(pid)
                 if not matched:
@@ -1030,14 +1073,14 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
         eid: set(pids) for eid, pids in host_assignments.items()
     }
     stats["curve_refined"] = _refine_curve_assignments(
-        doc, host_assignments, panel_outlines
+        doc, host_assignments, interior_outlines
     )
     _seed_assignments_from_parameters(doc, host_assignments, known_pids)
     stats["propagated"] = propagate_panel_assignments(
-        doc, host_assignments, panel_outlines
+        doc, host_assignments, interior_outlines
     )
     stats["propagated"] += propagate_panel_assignments(
-        doc, host_assignments, panel_outlines
+        doc, host_assignments, interior_outlines
     )
 
     return host_assignments, link_assignments, stats, spatial_assignments
@@ -1062,6 +1105,7 @@ def fill_mep_bimsf_containers(
         "tagged": 0,
         "updated": 0,
         "cleared_crossing": 0,
+        "cleared_outside": 0,
         "cleared_bends": 0,
         "skipped_no_param": 0,
         "unassigned": 0,
@@ -1072,7 +1116,7 @@ def fill_mep_bimsf_containers(
         doc, panel_elements, link_zones
     )
     stats["propagated"] = assign_stats.get("propagated", 0)
-    panel_outlines = _build_panel_outlines(panel_elements, link_zones)
+    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
     known_pids = list(get_all_panel_ids(panel_elements, link_zones))
     valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
 
@@ -1087,13 +1131,15 @@ def fill_mep_bimsf_containers(
             continue
 
         if _is_panel_crossing_connection(
-            el, mep_assignments, panel_outlines, valid_ids
+            el, mep_assignments, interior_outlines, valid_ids
         ):
             if clear_crossings and _clear_container(el):
                 stats["cleared_crossing"] += 1
             continue
 
-        if not _curve_touches_panel_zone(el, panel_outlines):
+        if not _curve_touches_panel_zone(el, interior_outlines):
+            if _read_container_value(el) and _clear_container(el):
+                stats["cleared_outside"] += 1
             stats["unassigned"] += 1
             continue
 
@@ -1102,12 +1148,18 @@ def fill_mep_bimsf_containers(
             pid = list(pids)[0]
         elif len(pids) == 0 or len(pids) > 1:
             pid = _resolve_panel_for_element(
-                el, mep_assignments, panel_outlines, pids
+                el, mep_assignments, interior_outlines, pids
             )
             if pid:
                 stats["resolved"] += 1
 
         if not pid:
+            stats["unassigned"] += 1
+            continue
+
+        if not _mep_belongs_in_panel(el, pid, interior_outlines):
+            if _read_container_value(el) and _clear_container(el):
+                stats["cleared_outside"] += 1
             stats["unassigned"] += 1
             continue
 
@@ -1512,7 +1564,7 @@ def combine_panels_group_color(
     mep_assignments, link_assignments, link_stats, spatial_assignments = (
         assign_mep_to_panels(doc, panel_elements, link_zones)
     )
-    panel_outlines = _build_panel_outlines(panel_elements, link_zones)
+    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
     valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
     red_settings, panel_settings = _view_color_kit(doc)
 
@@ -1552,7 +1604,7 @@ def combine_panels_group_color(
                 continue
             eid_int = eid.IntegerValue
             if _is_panel_crossing_connection(
-                el, mep_assignments, panel_outlines, valid_ids
+                el, mep_assignments, interior_outlines, valid_ids
             ):
                 if eid not in processed_crossings:
                     view.SetElementOverrides(eid, red_settings)
@@ -1562,6 +1614,8 @@ def combine_panels_group_color(
                     _clear_container(el)
                 continue
             if _assignment_matches_panel(pids, pid):
+                if not _mep_belongs_in_panel(el, pid, interior_outlines):
+                    continue
                 if eid_int not in added_to_group:
                     added_to_group.add(eid_int)
                     group_ids.Add(eid)

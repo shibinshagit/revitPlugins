@@ -215,7 +215,7 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     msg = (
         "Done.\n\n"
         "1. BIMSF_Container filled: {0} new, {1} updated\n"
-        "2. Via connected runs: {2} | Resolved: {3} | Crossing cleared: {4}\n"
+        "2. Via connected runs: {2} | Resolved: {3} | Crossing cleared: {4} | Outside cleared: {10}\n"
         "3. Panels copied to host: {5}\n"
         "4. Framing members copied: {6}\n"
         "5. Host groups (panel + MEP): {7}\n"
@@ -231,6 +231,7 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
             copy_stats.get("host_groups", 0),
             group_stats.get("crossing_count", 0),
             "ON" if sync_on else "OFF",
+            tag_stats.get("cleared_outside", 0),
         )
     )
 
