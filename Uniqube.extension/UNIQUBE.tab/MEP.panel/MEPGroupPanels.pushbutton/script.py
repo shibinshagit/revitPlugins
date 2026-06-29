@@ -40,7 +40,7 @@ class MEPPanelSelector(forms.WPFWindow):
 
         if mode_host:
             self.summary_text.Text = (
-                "{0} panel(s). {1} panel crossings (red connecting pipes/fittings). "
+                "{0} panel(s). {1} panel-crossing pipes/fittings (red). "
                 "Auto-fills BIMSF_Container, copies panel framing from link, "
                 "groups panel + MEP in host, and turns on selection sync.".format(
                     len(rows), crossing_count
@@ -219,7 +219,7 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         "3. Panels copied to host: {5}\n"
         "4. Framing members copied: {6}\n"
         "5. Host groups (panel + MEP): {7}\n"
-        "6. Panel crossings (red): {8}\n"
+        "6. Panel crossings (red pipes/fittings): {8}\n"
         "7. Selection sync: {9}".format(
             tag_stats.get("tagged", 0),
             tag_stats.get("updated", 0),

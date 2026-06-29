@@ -202,14 +202,100 @@ def _endpoint_panels(elem, panel_outlines):
     return start_p, end_p
 
 
+def _location_panels(elem, panel_outlines):
+    """Panels whose zone contains the element insert / connector origin."""
+    panels = set()
+    try:
+        loc = elem.Location
+        if isinstance(loc, DB.LocationPoint):
+            pt = loc.Point
+            for pid, outline in panel_outlines.items():
+                if _point_in_outline(pt, outline):
+                    panels.add(pid)
+            return panels
+    except Exception:
+        pass
+    cm = _get_mep_connector_manager(elem)
+    if cm is not None:
+        try:
+            for conn in cm.Connectors:
+                try:
+                    pt = conn.Origin
+                except Exception:
+                    continue
+                for pid, outline in panel_outlines.items():
+                    if _point_in_outline(pt, outline):
+                        panels.add(pid)
+        except Exception:
+            pass
+    if not panels:
+        try:
+            bbox = elem.get_BoundingBox(None)
+        except Exception:
+            bbox = None
+        if bbox is not None:
+            center = DB.XYZ(
+                (bbox.Min.X + bbox.Max.X) / 2.0,
+                (bbox.Min.Y + bbox.Max.Y) / 2.0,
+                (bbox.Min.Z + bbox.Max.Z) / 2.0,
+            )
+            for pid, outline in panel_outlines.items():
+                if _point_in_outline(center, outline):
+                    panels.add(pid)
+    return panels
+
+
+def _curve_touches_panel_zone(el, panel_outlines):
+    """True when at least one curve endpoint lies inside a panel zone."""
+    if not isinstance(el, DB.MEPCurve):
+        return bool(_location_panels(el, panel_outlines))
+    start_p, end_p = _endpoint_panels(el, panel_outlines)
+    return bool(start_p or end_p)
+
+
+def _curve_crosses_panel_boundary(el, panel_outlines):
+    """True when a pipe/conduit enters or exits a panel (inside ↔ outside)."""
+    if not isinstance(el, DB.MEPCurve):
+        return False
+    start_p, end_p = _endpoint_panels(el, panel_outlines)
+    start_in = bool(start_p)
+    end_in = bool(end_p)
+
+    # One end inside a panel zone, the other outside all zones.
+    if start_in != end_in:
+        return True
+
+    # Endpoints in two different panels (no shared panel at endpoints).
+    if start_p and end_p and not (start_p & end_p):
+        start_names = {panel_display_name(p).lower() for p in start_p}
+        end_names = {panel_display_name(p).lower() for p in end_p}
+        if start_names != end_names:
+            return True
+    return False
+
+
 def _refine_curve_assignments(doc, host_assignments, panel_outlines):
-    """Assign conduits/pipes from curve endpoints inside panel zones."""
+    """Assign conduits/pipes from endpoints; drop bbox-only hits outside panels."""
     refined = 0
     for eid in list(host_assignments.keys()):
         el = doc.GetElement(eid)
         if el is None or not isinstance(el, DB.MEPCurve):
             continue
         start_p, end_p = _endpoint_panels(el, panel_outlines)
+
+        if not start_p and not end_p:
+            if host_assignments[eid]:
+                host_assignments[eid] = set()
+                refined += 1
+            continue
+
+        if _curve_crosses_panel_boundary(el, panel_outlines):
+            combined = start_p | end_p
+            if host_assignments[eid] != combined:
+                host_assignments[eid] = combined
+                refined += 1
+            continue
+
         chosen = None
         if len(start_p) == 1 and start_p == end_p:
             chosen = list(start_p)[0]
@@ -257,25 +343,37 @@ def _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids):
 
 
 def _is_panel_crossing_connection(el, host_assignments, panel_outlines, valid_ids):
-    """True for fittings or pipe/conduit segments that join two different panels."""
-    if _is_mep_connection(el):
-        panels = _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids)
-        names = set()
-        for p in panels:
-            if p:
-                names.add(panel_display_name(p).lower())
-        return len(names) > 1
-
+    """True for fittings or pipes that enter/exit a panel or join two panels."""
     if isinstance(el, DB.MEPCurve):
-        start_p, end_p = _endpoint_panels(el, panel_outlines)
-        start_names = {
-            panel_display_name(p).lower() for p in start_p if p
-        }
-        end_names = {
-            panel_display_name(p).lower() for p in end_p if p
-        }
-        if len(start_names) == 1 and len(end_names) == 1:
-            return start_names != end_names
+        return _curve_crosses_panel_boundary(el, panel_outlines)
+
+    if _is_mep_connection(el):
+        for nb in _mep_network_neighbors(el, valid_ids):
+            if isinstance(nb, DB.MEPCurve) and _curve_crosses_panel_boundary(
+                nb, panel_outlines
+            ):
+                return True
+
+        has_inside = False
+        has_outside = False
+        panel_names = set()
+        for nb in _mep_network_neighbors(el, valid_ids):
+            if isinstance(nb, DB.MEPCurve):
+                sp, ep = _endpoint_panels(nb, panel_outlines)
+                if sp or ep:
+                    has_inside = True
+                    for p in sp | ep:
+                        panel_names.add(panel_display_name(p).lower())
+                else:
+                    has_outside = True
+        if has_inside and has_outside:
+            return True
+        if len(panel_names) > 1:
+            return True
+
+        loc_panels = _location_panels(el, panel_outlines)
+        if loc_panels and has_outside:
+            return True
     return False
 
 
@@ -623,12 +721,15 @@ def _seed_assignments_from_parameters(doc, host_assignments, known_pids):
     return seeded
 
 
-def propagate_panel_assignments(doc, host_assignments, max_passes=100):
+def propagate_panel_assignments(doc, host_assignments, panel_outlines=None, max_passes=100):
     """Extend panel assignment along connected MEP runs.
 
     Unassigned elements (0 panels) or ambiguous bbox hits (2+ panels) inherit
     the panel when all resolved connected neighbors share one panel id.
+    Only propagates to elements that touch a panel zone (endpoint/location).
     """
+    if panel_outlines is None:
+        panel_outlines = {}
     valid_ids = set(eid.IntegerValue for eid in host_assignments.keys())
     element_cache = {}
     propagated = 0
@@ -654,6 +755,15 @@ def propagate_panel_assignments(doc, host_assignments, max_passes=100):
         changed = False
         for eid, pids in list(host_assignments.items()):
             if len(pids) == 1:
+                continue
+            el = get_elem(eid)
+            if el is None:
+                continue
+            if panel_outlines and not _curve_touches_panel_zone(el, panel_outlines):
+                continue
+            if isinstance(el, DB.MEPCurve) and _curve_crosses_panel_boundary(
+                el, panel_outlines
+            ):
                 continue
             conn_panels = neighbor_panels(eid)
             if len(conn_panels) != 1:
@@ -923,8 +1033,12 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
         doc, host_assignments, panel_outlines
     )
     _seed_assignments_from_parameters(doc, host_assignments, known_pids)
-    stats["propagated"] = propagate_panel_assignments(doc, host_assignments)
-    stats["propagated"] += propagate_panel_assignments(doc, host_assignments)
+    stats["propagated"] = propagate_panel_assignments(
+        doc, host_assignments, panel_outlines
+    )
+    stats["propagated"] += propagate_panel_assignments(
+        doc, host_assignments, panel_outlines
+    )
 
     return host_assignments, link_assignments, stats, spatial_assignments
 
@@ -977,6 +1091,10 @@ def fill_mep_bimsf_containers(
         ):
             if clear_crossings and _clear_container(el):
                 stats["cleared_crossing"] += 1
+            continue
+
+        if not _curve_touches_panel_zone(el, panel_outlines):
+            stats["unassigned"] += 1
             continue
 
         pid = None
@@ -1386,7 +1504,7 @@ def combine_panels_group_color(
 
     Host framing and MEP go into Revit groups. Linked panel framing is
     colored in the active view and should be grouped in the link file via
-    group_link_panel_framing(). Panel-crossing fittings and connecting pipes red.
+    group_link_panel_framing(). Panel-crossing pipes/fittings (enter/exit panel) red.
     """
     if link_framing is None:
         link_framing = map_link_framing_by_container(doc)
@@ -1462,10 +1580,8 @@ def combine_panels_group_color(
                 continue
             if _assignment_matches_panel(pids, pid):
                 set_link_element_override(view, link_inst, elem, settings)
-            elif (
-                _is_mep_connection(elem)
-                and len(pids) > 1
-                and _assignment_crosses_panel(pids, pid)
+            elif _is_mep_connection(elem) and (
+                len(pids) > 1 or _assignment_crosses_panel(pids, pid)
             ):
                 set_link_element_override(view, link_inst, elem, red_settings)
                 stats["crossing_count"] += 1
