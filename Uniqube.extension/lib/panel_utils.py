@@ -1477,11 +1477,38 @@ def _remove_host_framing_for_panel(host_doc, pid):
     removed = 0
     for el in merge_framing_for_panel(map_framing(host_doc), pid):
         try:
+            gid = el.GroupId
+            if gid is not None and gid != DB.ElementId.InvalidElementId:
+                grp = host_doc.GetElement(gid)
+                if grp is not None and isinstance(grp, DB.Group):
+                    grp.UngroupMembers()
+        except Exception:
+            pass
+    for el in merge_framing_for_panel(map_framing(host_doc), pid):
+        try:
             host_doc.Delete(el.Id)
             removed += 1
         except Exception:
             pass
     return removed
+
+
+def _ensure_framing_links_loaded(host_doc):
+    """Reload link instances whose link document is not currently open."""
+    loaded = 0
+    for link_inst in (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.RevitLinkInstance)
+        .ToElements()
+    ):
+        if link_inst.GetLinkDocument() is not None:
+            continue
+        try:
+            link_inst.Load()
+            loaded += 1
+        except Exception:
+            pass
+    return loaded
 
 
 def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regroup=True):
@@ -1509,7 +1536,10 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
         return stats
 
     copy_opts = DB.CopyPasteOptions()
-    copy_opts.SetDuplicateTypeNamesHandler(_CopyUseDestinationTypes())
+    try:
+        copy_opts.SetDuplicateTypeNamesHandler(_CopyUseDestinationTypes())
+    except Exception:
+        pass
     host_framing = map_framing(host_doc)
     copied_pids = []
 

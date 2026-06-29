@@ -41,9 +41,8 @@ class MEPPanelSelector(forms.WPFWindow):
         if mode_host:
             self.summary_text.Text = (
                 "{0} panel(s). {1} crossing MEP (red). "
-                "Auto-fills BIMSF_Container, groups MEP, copies panel framing "
-                "from link into this model, regroups panel + MEP, "
-                "and turns on selection sync.".format(
+                "Auto-fills BIMSF_Container, copies panel framing from link, "
+                "groups panel + MEP in host, and turns on selection sync.".format(
                     len(rows), crossing_count
                 )
             )
@@ -104,6 +103,17 @@ def _is_framing_primary_doc(doc):
     return bool(pu.map_framing(doc))
 
 
+def _disable_sync():
+    try:
+        import panel_selection_sync as pss
+        if pss.is_enabled():
+            pss.disable(uidoc)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _run_framing_doc(selected):
     stats = {"link_groups": 0, "errors": []}
     with revit.Transaction("UNIQUBE: Group Panel Framing"):
@@ -123,8 +133,14 @@ def _run_framing_doc(selected):
     return stats
 
 
-def _run_copy_to_host(selected, link_framing):
-    """Copy linked framing into host and regroup — returns copy stats dict."""
+def _run_host_doc(selected, panel_elements, link_zones, link_framing):
+    if isinstance(view, DB.ViewSheet):
+        forms.alert("Open a model view, not a sheet.", title="UNIQUBE")
+        return
+
+    _disable_sync()
+
+    tag_stats = {}
     copy_stats = {
         "panels": 0,
         "members_copied": 0,
@@ -134,60 +150,39 @@ def _run_copy_to_host(selected, link_framing):
         "errors": [],
         "copied_pids": [],
     }
-    if not link_framing:
-        copy_stats["skipped"].append("(no structural link loaded)")
-        return copy_stats
+    group_stats = {}
 
-    if not hasattr(pu, "copy_panel_framing_to_host"):
-        copy_stats["errors"].append("panel_utils.py out of date — git pull")
-        return copy_stats
-
-    try:
-        with revit.Transaction("UNIQUBE: Copy Panel to Host"):
-            copy_stats = pu.copy_panel_framing_to_host(
-                doc, view, selected, link_framing, regroup=False
-            )
-    except Exception as ex:
-        copy_stats["errors"].append("Copy: {}".format(ex))
-        return copy_stats
-
-    copied_pids = copy_stats.get("copied_pids", [])
-    if copy_stats.get("panels", 0) > 0 and copied_pids:
-        try:
-            with revit.Transaction("UNIQUBE: Regroup Panel + MEP"):
-                regroup = pu.regroup_panels_in_host(
-                    doc, view, copied_pids, tag_mep=True
-                )
-                copy_stats["host_groups"] = regroup.get("groups", 0)
-                copy_stats.setdefault("errors", []).extend(
-                    regroup.get("group_errors", [])
-                )
-        except Exception as ex:
-            copy_stats.setdefault("errors", []).append("Regroup: {}".format(ex))
-
-    if hasattr(pu, "verify_panel_copy"):
-        copy_stats["verify"] = pu.verify_panel_copy(doc, selected)
-    return copy_stats
-
-
-def _run_host_doc(selected, panel_elements, link_zones, link_framing):
-    if isinstance(view, DB.ViewSheet):
-        forms.alert("Open a model view, not a sheet.", title="UNIQUBE")
-        return
-
-    tag_stats = {}
+    tg = DB.TransactionGroup(doc, "UNIQUBE: Prepare MEP Panels")
+    tg.Start()
     try:
         with revit.Transaction("UNIQUBE: Fill BIMSF_Container"):
             tag_stats = pu.fill_mep_bimsf_containers(
                 doc, panel_elements, link_zones, selected=selected
             )
-    except Exception as ex:
-        forms.alert("Auto-fill BIMSF_Container failed:\n{}".format(ex), title="UNIQUBE")
-        return
 
-    group_stats = {}
-    try:
-        with revit.Transaction("UNIQUBE: Group MEP + Panels"):
+        with revit.Transaction("UNIQUBE: Reload Structural Links"):
+            pu._ensure_framing_links_loaded(doc)
+
+        with revit.Transaction("UNIQUBE: Copy Panel to Host"):
+            link_framing = pu.map_link_framing_by_container(doc)
+            if not link_framing:
+                copy_stats["skipped"].append(
+                    "(structural link not loaded — reload link and retry)"
+                )
+            elif hasattr(pu, "copy_panel_framing_to_host"):
+                copy_stats = pu.copy_panel_framing_to_host(
+                    doc, view, selected, link_framing, regroup=False
+                )
+            else:
+                copy_stats["errors"].append(
+                    "panel_utils.py out of date — git pull"
+                )
+
+        panel_elements = pu.map_framing(doc)
+        link_zones = pu.map_framing_from_links(doc)
+        link_framing = pu.map_link_framing_by_container(doc)
+
+        with revit.Transaction("UNIQUBE: Group Panel + MEP"):
             pu._delete_groups_in_doc(doc, selected)
             group_stats = pu.combine_panels_group_color(
                 doc,
@@ -198,12 +193,17 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
                 link_framing=link_framing,
                 tag_mep=True,
             )
+            copy_stats["host_groups"] = group_stats.get("groups", 0)
+
+        tg.Assimilate()
     except Exception as ex:
-        forms.alert("Grouping failed:\n{}".format(ex), title="UNIQUBE")
+        if tg.HasStarted() and not tg.HasEnded():
+            tg.RollBack()
+        forms.alert("Prepare MEP Panels failed:\n{}".format(ex), title="UNIQUBE")
         return
 
-    link_framing = pu.map_link_framing_by_container(doc)
-    copy_stats = _run_copy_to_host(selected, link_framing)
+    if hasattr(pu, "verify_panel_copy"):
+        copy_stats["verify"] = pu.verify_panel_copy(doc, selected)
 
     sync_on = False
     try:
@@ -215,25 +215,21 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     msg = (
         "Done.\n\n"
         "1. BIMSF_Container filled: {0} new, {1} updated\n"
-        "2. Via connected runs: {2} | Resolved: {3} | Crossing cleared: {4} | Bends cleared: {5}\n"
-        "3. MEP groups: {6}\n"
-        "4. Crossing MEP (red): {7}\n"
-        "5. Panels copied to host: {8}\n"
-        "6. Framing members copied: {9}\n"
-        "7. Final host groups (panel + MEP): {10}\n"
-        "8. Selection sync: {11}".format(
+        "2. Via connected runs: {2} | Resolved: {3} | Crossing cleared: {4}\n"
+        "3. Panels copied to host: {5}\n"
+        "4. Framing members copied: {6}\n"
+        "5. Host groups (panel + MEP): {7}\n"
+        "6. Crossing MEP (red): {8}\n"
+        "7. Selection sync: {9}".format(
             tag_stats.get("tagged", 0),
             tag_stats.get("updated", 0),
             tag_stats.get("propagated", 0),
             tag_stats.get("resolved", 0),
             tag_stats.get("cleared_crossing", 0),
-            tag_stats.get("cleared_bends", 0),
-            group_stats.get("groups", 0),
-            group_stats.get("crossing_count", 0),
             copy_stats.get("panels", 0),
             copy_stats.get("members_copied", 0),
-            copy_stats.get("host_groups", 0)
-            or group_stats.get("groups", 0),
+            copy_stats.get("host_groups", 0),
+            group_stats.get("crossing_count", 0),
             "ON" if sync_on else "OFF",
         )
     )
@@ -263,25 +259,20 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     if copy_stats.get("panels", 0) > 0:
         msg += (
             "\n\nPanel framing is in the host model. "
-            "Remove the structural link (Manage Links → Remove) "
-            "when all panels show OK in Verify."
+            "You can remove the structural link (Manage Links → Remove) "
+            "when Verify shows OK for each panel."
         )
     elif link_framing:
         msg += (
-            "\n\nClick any panel or MEP in the view — sync selects "
-            "the full panel + MEP pair automatically. "
-            "Use Sync Panel Selection to turn sync OFF when done."
-        )
-    elif sync_on:
-        msg += (
-            "\n\nUse Sync Panel Selection to turn sync OFF when done."
+            "\n\nCopy failed — keep the structural link loaded and retry. "
+            "Do not remove the link until Verify shows host framing."
         )
 
     forms.alert(msg, title="UNIQUBE — Prepare MEP Panels")
 
 
 def main():
-    if not hasattr(pu, "select_panel_pair"):
+    if not hasattr(pu, "copy_panel_framing_to_host"):
         forms.alert(
             "panel_utils.py is out of date.\n\n"
             "git pull the full revitPlugins folder, then pyRevit → Reload.",
