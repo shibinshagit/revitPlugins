@@ -1,0 +1,2 @@
+Pillow>=9.0
+svg.path>=6.0

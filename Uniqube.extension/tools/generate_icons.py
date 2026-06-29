@@ -1,295 +1,198 @@
 # -*- coding: utf-8 -*-
-"""Generate 32x32 PNG icons for UNIQUBE pyRevit pushbuttons."""
+"""Generate UNIQUBE pyRevit ribbon icons from Fluent UI (via Iconify API).
+
+Icons: Microsoft Fluent UI System Icons (MIT) — https://github.com/microsoft/fluentui-system-icons
+Fetched through Iconify API for consistent 24px regular glyphs.
+
+Usage:
+    pip install -r tools/requirements-icons.txt
+    python3 tools/generate_icons.py
+
+Output: icon.png + icon32.png (opaque RGB) in each pushbutton folder.
+"""
 from __future__ import print_function
 
+import io
 import os
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+
 from PIL import Image, ImageDraw
+from svg.path import parse_path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIZE = 32
+GLYPH = 20
+PAD = (SIZE - GLYPH) // 2
+VIEW = 24.0
 
-# Uniqube brand palette
-BG = (26, 54, 93)          # navy
-BG_ACCENT = (0, 120, 120)  # teal
-FG = (255, 255, 255)
-FG_DIM = (180, 210, 230)
-RED = (220, 60, 60)
-GREEN = (80, 180, 100)
-AMBER = (240, 180, 60)
+BG = (26, 54, 93)
+BG_ACCENT = (0, 120, 120)
+ICONIFY = "https://api.iconify.design/fluent/{name}.svg?color=%23ffffff"
+CACHE = os.path.join(os.path.dirname(__file__), "icon_cache")
+
+# rel_path -> (fluent iconify slug, accent background)
+ICON_MAP = {
+    "UNIQUBE.tab/MEP.panel/MEPGroupPanels.pushbutton": (
+        "apps-list-24-regular", True
+    ),
+    "UNIQUBE.tab/MEP.panel/FillMEPContainers.pushbutton": (
+        "tag-24-regular", False
+    ),
+    "UNIQUBE.tab/MEP.panel/SyncPanelSelection.pushbutton": (
+        "arrow-sync-24-regular", False
+    ),
+    "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown/ConduitFittingSched.pushbutton": (
+        "plug-connected-24-regular", False
+    ),
+    "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown/ElecFixtureSched.pushbutton": (
+        "lightbulb-24-regular", False
+    ),
+    "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown/PipeFittingSched.pushbutton": (
+        "pipeline-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelSetup.pulldown/SetupBIMSF.pushbutton": (
+        "settings-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelSetup.pulldown/IFCPanelMapper.pushbutton": (
+        "map-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelGrouping.pulldown/GroupPanels.pushbutton": (
+        "group-list-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelGrouping.pulldown/UngroupPanels.pushbutton": (
+        "group-dismiss-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelGrouping.pulldown/PanelCombineColor.pushbutton": (
+        "color-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelAssembly.pulldown/PanelCombineAssembly.pushbutton": (
+        "cube-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelAssembly.pulldown/CreateAssemblies.pushbutton": (
+        "stack-add-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelAssembly.pulldown/AssemblyShopDrawing.pushbutton": (
+        "print-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/AdvancePositionID.pushbutton": (
+        "number-symbol-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/MasterPanelList.pushbutton": (
+        "table-24-regular", True
+    ),
+    "UNIQUBE.tab/Structural.panel/BOMExtraction.pushbutton": (
+        "document-table-24-regular", False
+    ),
+    "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown": (
+        "table-multiple-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelSetup.pulldown": (
+        "settings-24-regular", False
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelGrouping.pulldown": (
+        "group-list-24-regular", True
+    ),
+    "UNIQUBE.tab/Structural.panel/PanelAssembly.pulldown": (
+        "cube-24-regular", False
+    ),
+    "UNIQUBE.tab": ("grid-24-regular", True),
+}
 
 
-def _base(accent=False):
-    img = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([1, 1, 30, 30], radius=6, fill=BG_ACCENT if accent else BG)
-    return img, d
+def _fetch_svg(slug):
+    os.makedirs(CACHE, exist_ok=True)
+    cache_path = os.path.join(CACHE, slug + ".svg")
+    if os.path.isfile(cache_path):
+        with open(cache_path, "rb") as handle:
+            return handle.read()
+
+    url = ICONIFY.format(name=slug)
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "UniqubeIconGenerator/1.0"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+    except urllib.error.HTTPError as ex:
+        raise RuntimeError("Icon not found: {} ({})".format(slug, ex))
+
+    with open(cache_path, "wb") as handle:
+        handle.write(data)
+    return data
 
 
-def _flatten(img):
-    """Revit ribbon icons must be opaque RGB — transparent PNGs may not show."""
-    out = Image.new("RGB", (SIZE, SIZE), BG)
-    if img.mode == "RGBA":
-        out.paste(img, (0, 0), img)
-    else:
-        out.paste(img, (0, 0))
-    return out
+def _path_polygons(svg_bytes):
+    """Turn SVG path elements into filled polygons in 24x24 view space."""
+    root = ET.fromstring(svg_bytes)
+    polygons = []
+    for elem in root.iter():
+        tag = elem.tag.split("}")[-1]
+        if tag != "path":
+            continue
+        d_attr = elem.get("d")
+        if not d_attr:
+            continue
+        parsed = parse_path(d_attr)
+        flat = []
+        for seg in parsed:
+            length = max(getattr(seg, "length", lambda: 1.0)(), 0.01)
+            steps = max(int(length * 2), 4)
+            for i in range(steps + 1):
+                pt = seg.point(i / float(steps))
+                flat.append((pt.real, pt.imag))
+        if len(flat) >= 3:
+            polygons.append(flat)
+    return polygons
+
+
+def _render_glyph(svg_bytes):
+    """Rasterize SVG paths to a white-on-transparent GLYPH x GLYPH image."""
+    scale = GLYPH / VIEW
+    img = Image.new("RGBA", (GLYPH, GLYPH), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    for poly in _path_polygons(svg_bytes):
+        scaled = [(x * scale, y * scale) for x, y in poly]
+        draw.polygon(scaled, fill=(255, 255, 255, 255))
+    return img
+
+
+def _compose(svg_bytes, accent=False):
+    bg = BG_ACCENT if accent else BG
+    canvas = Image.new("RGBA", (SIZE, SIZE), bg + (255,))
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle([1, 1, 30, 30], radius=6, fill=bg + (255,))
+    glyph = _render_glyph(svg_bytes)
+    canvas.paste(glyph, (PAD, PAD), glyph)
+    rgb = Image.new("RGB", (SIZE, SIZE), bg)
+    rgb.paste(canvas, mask=canvas.split()[3])
+    return rgb
 
 
 def _save(rel_path, img):
     folder = os.path.join(ROOT, rel_path)
     os.makedirs(folder, exist_ok=True)
-    flat = _flatten(img)
     for name in ("icon.png", "icon32.png"):
         path = os.path.join(folder, name)
-        flat.save(path, "PNG")
+        img.save(path, "PNG")
         print("wrote", path)
 
 
-def icon_prepare_mep():
-    img, d = _base(accent=True)
-    d.rectangle([6, 8, 13, 24], outline=FG, width=1)
-    d.rectangle([19, 8, 26, 24], outline=FG, width=1)
-    d.line([9, 14, 9, 20], fill=GREEN, width=2)
-    d.line([22, 14, 22, 20], fill=GREEN, width=2)
-    d.line([13, 17, 19, 17], fill=RED, width=2)
-    return img
-
-
-def icon_fill_bimsf():
-    img, d = _base()
-    d.polygon([(16, 5), (26, 10), (26, 22), (16, 27), (6, 22), (6, 10)], outline=FG, width=1)
-    d.line([10, 14, 22, 14], fill=FG_DIM, width=1)
-    d.line([10, 18, 20, 18], fill=FG_DIM, width=1)
-    d.rectangle([11, 10, 15, 12], fill=AMBER)
-    return img
-
-
-def icon_sync():
-    img, d = _base()
-    d.arc([7, 7, 19, 19], 200, 340, fill=FG, width=2)
-    d.polygon([(18, 8), (22, 6), (20, 12)], fill=FG)
-    d.arc([13, 13, 25, 25], 20, 160, fill=FG_DIM, width=2)
-    d.polygon([(14, 24), (10, 26), (12, 20)], fill=FG_DIM)
-    return img
-
-
-def icon_schedule_conduit():
-    img, d = _base()
-    d.rectangle([5, 5, 27, 27], outline=FG, width=1)
-    d.line([5, 11, 27, 11], fill=FG_DIM, width=1)
-    d.line([5, 17, 27, 17], fill=FG_DIM, width=1)
-    d.line([14, 5, 14, 27], fill=FG_DIM, width=1)
-    d.ellipse([17, 20, 25, 26], outline=AMBER, width=2)
-    return img
-
-
-def icon_schedule_elec():
-    img, d = _base()
-    d.rectangle([5, 5, 27, 27], outline=FG, width=1)
-    d.line([5, 11, 27, 11], fill=FG_DIM, width=1)
-    d.line([5, 17, 27, 17], fill=FG_DIM, width=1)
-    d.polygon([(20, 19), (17, 26), (21, 26), (18, 19)], fill=AMBER)
-    return img
-
-
-def icon_schedule_pipe():
-    img, d = _base()
-    d.rectangle([5, 5, 27, 27], outline=FG, width=1)
-    d.line([5, 11, 27, 11], fill=FG_DIM, width=1)
-    d.line([5, 17, 27, 17], fill=FG_DIM, width=1)
-    d.line([17, 20, 25, 20], fill=GREEN, width=3)
-    d.ellipse([15, 18, 19, 22], outline=GREEN, width=1)
-    return img
-
-
-def icon_setup_bimsf():
-    img, d = _base()
-    d.ellipse([8, 8, 24, 24], outline=FG, width=1)
-    d.line([16, 11, 16, 16], fill=FG, width=2)
-    d.rectangle([14, 16, 18, 18], fill=AMBER)
-    d.line([11, 21, 21, 21], fill=FG_DIM, width=1)
-    return img
-
-
-def icon_ifc_map():
-    img, d = _base()
-    d.rectangle([5, 10, 14, 22], outline=FG, width=1)
-    d.rectangle([18, 10, 27, 22], outline=FG, width=1)
-    d.line([14, 16, 18, 16], fill=AMBER, width=2)
-    d.polygon([(16, 14), (20, 16), (16, 18)], fill=AMBER)
-    return img
-
-
-def icon_group():
-    img, d = _base()
-    d.rectangle([6, 7, 14, 15], outline=FG, width=1)
-    d.rectangle([18, 7, 26, 15], outline=FG, width=1)
-    d.rectangle([6, 17, 14, 25], outline=FG, width=1)
-    d.rectangle([18, 17, 26, 25], outline=FG, width=1)
-    d.rectangle([4, 5, 28, 27], outline=GREEN, width=1)
-    return img
-
-
-def icon_ungroup():
-    img, d = _base()
-    d.rectangle([5, 5, 13, 13], outline=FG, width=1)
-    d.rectangle([19, 5, 27, 13], outline=FG, width=1)
-    d.rectangle([5, 19, 13, 27], outline=FG, width=1)
-    d.rectangle([19, 19, 27, 27], outline=FG, width=1)
-    d.line([13, 9, 19, 9], fill=RED, width=1)
-    d.line([13, 23, 19, 23], fill=RED, width=1)
-    return img
-
-
-def icon_combine_color():
-    img, d = _base()
-    d.rectangle([5, 14, 11, 20], fill=RED)
-    d.rectangle([13, 14, 19, 20], fill=GREEN)
-    d.rectangle([21, 14, 27, 20], fill=AMBER)
-    d.rectangle([8, 6, 24, 12], outline=FG, width=1)
-    d.line([10, 9, 22, 9], fill=FG_DIM, width=1)
-    return img
-
-
-def icon_combine_asm():
-    img, d = _base()
-    d.polygon([(16, 5), (26, 11), (26, 23), (16, 29), (6, 23), (6, 11)], outline=FG, width=1)
-    d.line([16, 11, 16, 23], fill=FG_DIM, width=1)
-    d.line([10, 14, 22, 14], fill=FG_DIM, width=1)
-    return img
-
-
-def icon_create_asm():
-    img, d = _base()
-    d.rectangle([8, 8, 24, 24], outline=FG, width=1)
-    d.line([16, 11, 16, 21], fill=GREEN, width=2)
-    d.line([11, 16, 21, 16], fill=GREEN, width=2)
-    return img
-
-
-def icon_shop_draw():
-    img, d = _base()
-    d.rectangle([6, 6, 26, 26], outline=FG, width=1)
-    d.rectangle([9, 9, 23, 18], outline=FG_DIM, width=1)
-    d.line([9, 21, 20, 21], fill=FG_DIM, width=1)
-    d.line([9, 24, 16, 24], fill=FG_DIM, width=1)
-    return img
-
-
-def icon_position_id():
-    img, d = _base()
-    d.line([8, 11, 8, 18], fill=FG, width=2)
-    d.line([8, 11, 12, 11], fill=FG, width=2)
-    d.line([8, 14, 11, 14], fill=FG, width=2)
-    d.ellipse([13, 11, 17, 18], outline=FG, width=2)
-    d.line([19, 18, 19, 11], fill=FG, width=2)
-    d.line([19, 11, 23, 11], fill=FG, width=2)
-    d.line([19, 14, 22, 14], fill=FG, width=2)
-    d.line([19, 18, 23, 18], fill=FG, width=2)
-    d.line([6, 22, 26, 22], fill=AMBER, width=2)
-    return img
-
-
-def icon_master_list():
-    img, d = _base(accent=True)
-    d.rectangle([5, 4, 27, 28], outline=FG, width=2)
-    d.line([5, 10, 27, 10], fill=FG, width=2)
-    d.line([12, 4, 12, 28], fill=FG_DIM, width=1)
-    for y in (14, 18, 23):
-        d.line([14, y, 26, y], fill=FG, width=1)
-    d.rectangle([7, 6, 11, 9], fill=AMBER)
-    return img
-
-
-def icon_bom():
-    img, d = _base()
-    d.rectangle([7, 5, 25, 27], outline=FG, width=1)
-    d.line([7, 11, 25, 11], fill=FG, width=1)
-    d.line([10, 14, 22, 14], fill=FG_DIM, width=1)
-    d.line([10, 17, 22, 17], fill=FG_DIM, width=1)
-    d.line([10, 20, 18, 20], fill=FG_DIM, width=1)
-    d.rectangle([10, 7, 14, 9], fill=AMBER)
-    return img
-
-
-def icon_pulldown_schedules():
-    img, d = _base()
-    d.rectangle([6, 6, 26, 26], outline=FG, width=1)
-    d.line([6, 12, 26, 12], fill=FG_DIM, width=1)
-    d.line([6, 18, 26, 18], fill=FG_DIM, width=1)
-    d.line([14, 6, 14, 26], fill=FG_DIM, width=1)
-    return img
-
-
-def icon_pulldown_panels():
-    img, d = _base(accent=True)
-    d.rectangle([7, 7, 25, 25], outline=FG, width=1)
-    d.line([7, 13, 25, 13], fill=FG_DIM, width=1)
-    d.line([7, 19, 25, 19], fill=FG_DIM, width=1)
-    d.line([15, 7, 15, 25], fill=FG_DIM, width=1)
-    return img
-
-
-def icon_pulldown_assembly():
-    img, d = _base()
-    d.polygon([(16, 6), (25, 12), (25, 22), (16, 28), (7, 22), (7, 12)], outline=FG, width=1)
-    d.ellipse([13, 14, 19, 20], outline=GREEN, width=1)
-    return img
-
-
-def icon_pulldown_setup():
-    img, d = _base()
-    d.rectangle([9, 8, 23, 24], outline=FG, width=1)
-    d.line([12, 12, 20, 12], fill=FG_DIM, width=1)
-    d.line([12, 16, 20, 16], fill=FG_DIM, width=1)
-    d.rectangle([12, 19, 16, 21], fill=AMBER)
-    return img
-
-
-ICONS = {
-    "UNIQUBE.tab/MEP.panel/MEPGroupPanels.pushbutton": icon_prepare_mep,
-    "UNIQUBE.tab/MEP.panel/FillMEPContainers.pushbutton": icon_fill_bimsf,
-    "UNIQUBE.tab/MEP.panel/SyncPanelSelection.pushbutton": icon_sync,
-    "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown/ConduitFittingSched.pushbutton": icon_schedule_conduit,
-    "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown/ElecFixtureSched.pushbutton": icon_schedule_elec,
-    "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown/PipeFittingSched.pushbutton": icon_schedule_pipe,
-    "UNIQUBE.tab/Structural.panel/PanelSetup.pulldown/SetupBIMSF.pushbutton": icon_setup_bimsf,
-    "UNIQUBE.tab/Structural.panel/PanelSetup.pulldown/IFCPanelMapper.pushbutton": icon_ifc_map,
-    "UNIQUBE.tab/Structural.panel/PanelGrouping.pulldown/GroupPanels.pushbutton": icon_group,
-    "UNIQUBE.tab/Structural.panel/PanelGrouping.pulldown/UngroupPanels.pushbutton": icon_ungroup,
-    "UNIQUBE.tab/Structural.panel/PanelGrouping.pulldown/PanelCombineColor.pushbutton": icon_combine_color,
-    "UNIQUBE.tab/Structural.panel/PanelAssembly.pulldown/PanelCombineAssembly.pushbutton": icon_combine_asm,
-    "UNIQUBE.tab/Structural.panel/PanelAssembly.pulldown/CreateAssemblies.pushbutton": icon_create_asm,
-    "UNIQUBE.tab/Structural.panel/PanelAssembly.pulldown/AssemblyShopDrawing.pushbutton": icon_shop_draw,
-    "UNIQUBE.tab/Structural.panel/AdvancePositionID.pushbutton": icon_position_id,
-    "UNIQUBE.tab/Structural.panel/MasterPanelList.pushbutton": icon_master_list,
-    "UNIQUBE.tab/Structural.panel/BOMExtraction.pushbutton": icon_bom,
-}
-
-
-def icon_tab():
-    img, d = _base(accent=True)
-    d.rectangle([8, 8, 24, 24], outline=FG, width=2)
-    d.line([8, 14, 24, 14], fill=FG_DIM, width=1)
-    d.line([8, 20, 24, 20], fill=FG_DIM, width=1)
-    d.line([16, 8, 16, 24], fill=FG_DIM, width=1)
-    return img
-
-
-PULLDOWN_ICONS = {
-    "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown": icon_pulldown_schedules,
-    "UNIQUBE.tab/Structural.panel/PanelSetup.pulldown": icon_pulldown_setup,
-    "UNIQUBE.tab/Structural.panel/PanelGrouping.pulldown": icon_pulldown_panels,
-    "UNIQUBE.tab/Structural.panel/PanelAssembly.pulldown": icon_pulldown_assembly,
-}
-
-
 def main():
-    for rel, fn in ICONS.items():
-        _save(rel, fn())
-    for rel, fn in PULLDOWN_ICONS.items():
-        _save(rel, fn())
-    _save("UNIQUBE.tab", icon_tab())
+    errors = []
+    for rel, (slug, accent) in ICON_MAP.items():
+        try:
+            svg = _fetch_svg(slug)
+            _save(rel, _compose(svg, accent=accent))
+        except Exception as ex:
+            errors.append("{}: {}".format(rel, ex))
+            print("ERROR", rel, ex)
+
+    if errors:
+        print("\n{} icon(s) failed.".format(len(errors)))
+        raise SystemExit(1)
+    print("\nDone — {} Fluent UI icons.".format(len(ICON_MAP)))
 
 
 if __name__ == "__main__":
