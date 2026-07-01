@@ -99,7 +99,7 @@ def main():
     conduit_template = _find_view_template(CONDUIT_TEMPLATE_NAME)
     pipe_template = _find_view_template(PIPE_TEMPLATE_NAME)
 
-    with revit.Transaction("uniqube: Overall BOM Extraction"):
+    with revit.Transaction("uniqube: MEP BOM Extraction"):
         created = []
 
         _create_length_schedule(
