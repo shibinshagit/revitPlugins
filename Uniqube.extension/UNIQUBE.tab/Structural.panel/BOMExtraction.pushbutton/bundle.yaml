@@ -1,5 +1,5 @@
 title: BOM Extraction
 tooltip: >-
-  Create master BOM schedules for conduits and pipes
-  using view templates (Conduit length, Pipe Schedule).
+  Create overall master BOM schedules for the full project — pipes and conduits
+  (Type, Size, Length), electrical fixtures, pipe fittings, and conduit fittings.
 author: Uniqube
