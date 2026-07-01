@@ -32,7 +32,7 @@ def main():
     with revit.Transaction("uniqube: Pipe Fitting Schedule"):
         created = 0
         for pid in unique_ids:
-            sched_name = "Panel_{}__Fitting_Schedule".format(pid)
+            sched_name = "Panel_{}__Pipe_Fitting_Schedule".format(pid)
 
             for s in DB.FilteredElementCollector(doc).OfClass(DB.ViewSchedule):
                 if s.Name == sched_name:
