@@ -49,6 +49,9 @@ ICON_MAP = {
     "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown/ElecFixtureSched.pushbutton": (
         "lightbulb-24-regular", False
     ),
+    "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown/LightingFixtureSched.pushbutton": (
+        "flashlight-24-regular", False
+    ),
     "UNIQUBE.tab/MEP.panel/MEPSchedules.pulldown/PipeFittingSched.pushbutton": (
         "pipeline-24-regular", False
     ),

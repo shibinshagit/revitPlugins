@@ -5,6 +5,7 @@ Creates project-wide schedules for:
 - Pipes (Type, Size, Length)
 - Conduits (Type, Size, Length)
 - Electrical fixtures (Type, Count)
+- Lighting fixtures (Type, Count)
 - Pipe fittings (Type, Size, Count)
 - Conduit fittings (Type, Size, Count)
 """
@@ -17,7 +18,6 @@ CONDUIT_TEMPLATE_NAME = "Conduit length"
 PIPE_TEMPLATE_NAME = "Pipe Schedule"
 
 TYPE_EXCLUDES = ("Standard", "Primary")
-CONDUIT_FITTING_TYPE_EXCLUDES = TYPE_EXCLUDES + ("Bend",)
 
 
 def _delete_schedule(name):
@@ -126,6 +126,15 @@ def main():
         created.append("MASTER BOM - Electrical Fixtures")
 
         _create_count_schedule(
+            "MASTER BOM - Lighting Fixtures",
+            DB.BuiltInCategory.OST_LightingFixtures,
+            ["Type", "Count"],
+            ["Type"],
+            TYPE_EXCLUDES,
+        )
+        created.append("MASTER BOM - Lighting Fixtures")
+
+        _create_count_schedule(
             "MASTER BOM - Pipe Fittings",
             DB.BuiltInCategory.OST_PipeFitting,
             ["Type", "Size", "Count"],
@@ -139,7 +148,6 @@ def main():
             DB.BuiltInCategory.OST_ConduitFitting,
             ["Type", "Size", "Count"],
             ["Type", "Size"],
-            CONDUIT_FITTING_TYPE_EXCLUDES,
         )
         created.append("MASTER BOM - Conduit Fittings")
 
