@@ -254,7 +254,15 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         + copy_stats.get("errors", [])
     )
     if errors:
-        msg += "\n\nIssues:\n" + "\n".join(errors[:8])
+        brief = []
+        for err in errors[:8]:
+            text = str(err).strip()
+            if "\n" in text:
+                text = text.split("\n")[0]
+            if len(text) > 180:
+                text = text[:177] + "..."
+            brief.append(text)
+        msg += "\n\nIssues:\n" + "\n".join(brief)
 
     if copy_stats.get("panels", 0) > 0:
         msg += (

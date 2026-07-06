@@ -118,6 +118,22 @@ def group_label(group):
         return ""
 
 
+def _short_revit_error(ex):
+    """Return a single-line Revit/IronPython error for UI dialogs."""
+    msg = str(ex).strip()
+    if not msg:
+        return "unknown error"
+    for sep in ("\r\n", "\n"):
+        if sep in msg:
+            msg = msg.split(sep)[0].strip()
+            break
+    if "Parameter name:" in msg:
+        msg = msg.split("Parameter name:")[0].strip().rstrip(";")
+    if len(msg) > 180:
+        msg = msg[:177] + "..."
+    return msg
+
+
 def doc_has_mep_content(doc):
     """True when the document contains any host MEP elements."""
     for cat in MEP_CATS:
@@ -1507,24 +1523,6 @@ def _release_members_from_assemblies(doc, member_ids):
             pass
 
 
-def _split_framing_and_mep(doc, id_list):
-    framing = List[DB.ElementId]()
-    mep = List[DB.ElementId]()
-    for eid in id_list:
-        el = doc.GetElement(eid)
-        if el is None or el.Category is None:
-            continue
-        try:
-            bic = el.Category.BuiltInCategory
-        except Exception:
-            bic = None
-        if bic == DB.BuiltInCategory.OST_StructuralFraming:
-            framing.Add(eid)
-        else:
-            mep.Add(eid)
-    return framing, mep
-
-
 def _assembly_naming_category(doc, id_list):
     invalid = DB.ElementId.InvalidElementId
     for eid in id_list:
@@ -1540,18 +1538,6 @@ def _assembly_naming_category(doc, id_list):
         if el and el.Category and el.Category.Id != invalid:
             return el.Category.Id
     return DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
-
-
-def _try_add_members_to_assembly(asm, member_ids):
-    if member_ids is None or member_ids.Count == 0:
-        return True
-    try:
-        asm.AddMemberIds(member_ids)
-        return True
-    except AttributeError:
-        return False
-    except Exception:
-        return False
 
 
 def _create_panel_group_fallback(doc, pid, id_list):
@@ -1584,7 +1570,12 @@ def _prepare_members_for_assembly(doc, pid, member_ids):
 
 
 def _create_panel_assembly(doc, pid, member_ids):
-    """Create panel assembly; fall back to model group. Returns (ok, message)."""
+    """Create panel assembly from framing members; fall back to model group.
+
+    MEP is intentionally excluded — Revit often rejects mixed framing/MEP
+    assemblies and connected MEP cannot be model-grouped reliably.
+    Returns (ok, message).
+    """
     id_list, prep_err = _prepare_members_for_assembly(doc, pid, member_ids)
     if prep_err:
         return False, prep_err
@@ -1598,45 +1589,15 @@ def _create_panel_assembly(doc, pid, member_ids):
         new_asm.AssemblyTypeName = panel_group_name(pid)
         return True, None
     except Exception as ex:
-        errors.append(str(ex))
-
-    framing_ids, mep_ids = _split_framing_and_mep(doc, id_list)
-
-    if framing_ids.Count >= 2 and mep_ids.Count > 0:
-        try:
-            new_asm = DB.AssemblyInstance.Create(doc, framing_ids, naming_cat)
-            doc.Regenerate()
-            if _try_add_members_to_assembly(new_asm, mep_ids):
-                doc.Regenerate()
-                new_asm.AssemblyTypeName = panel_group_name(pid)
-                return True, None
-            try:
-                doc.Delete(new_asm.Id)
-            except Exception:
-                pass
-            errors.append("could not add MEP to framing assembly")
-        except Exception as ex:
-            errors.append(str(ex))
-
-    if framing_ids.Count >= 2:
-        try:
-            new_asm = DB.AssemblyInstance.Create(doc, framing_ids, naming_cat)
-            doc.Regenerate()
-            new_asm.AssemblyTypeName = panel_group_name(pid)
-            warn = None
-            if mep_ids.Count > 0:
-                warn = "framing assembled; MEP kept outside assembly"
-            return True, warn
-        except Exception as ex:
-            errors.append(str(ex))
+        errors.append(_short_revit_error(ex))
 
     try:
         _create_panel_group_fallback(doc, pid, id_list)
         return True, "Revit assembly failed — created model group instead"
     except Exception as ex:
-        errors.append(str(ex))
+        errors.append(_short_revit_error(ex))
 
-    return False, errors[0] if len(errors) == 1 else "; ".join(errors)
+    return False, errors[0] if len(errors) == 1 else "; ".join(errors[:3])
 
 
 def _delete_assemblies_in_doc(doc, selected):
@@ -2178,9 +2139,13 @@ def combine_panels_group_color(
                 stats["crossing_count"] += 1
 
         has_link = bool(merge_link_framing_for_panel(link_framing, pid))
-        if group_ids.Count > 1:
+        framing_ids = List[DB.ElementId]()
+        for el in merge_framing_for_panel(panel_elements, pid):
+            framing_ids.Add(el.Id)
+
+        if framing_ids.Count >= 2:
             try:
-                ok, msg = _create_panel_assembly(doc, pid, group_ids)
+                ok, msg = _create_panel_assembly(doc, pid, framing_ids)
                 if ok:
                     stats["groups"] += 1
                     if msg:
@@ -2193,11 +2158,13 @@ def combine_panels_group_color(
                     )
             except Exception as ex:
                 stats["group_errors"].append(
-                    "{}: {}".format(panel_group_name(pid), ex)
+                    "{}: {}".format(panel_group_name(pid), _short_revit_error(ex))
                 )
-        elif group_ids.Count == 1 and not has_link:
+        elif framing_ids.Count == 0 and has_link:
+            pass
+        elif framing_ids.Count == 1 and not has_link:
             stats["skipped_empty"] += 1
-        elif group_ids.Count == 0 and not has_link:
+        elif framing_ids.Count == 0 and not has_link:
             stats["skipped_empty"] += 1
 
     return stats
@@ -2359,6 +2326,7 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
         pass
     host_framing = map_framing(host_doc)
     copied_pids = []
+    known_pids = list(link_framing.keys())
 
     for pid in selected:
         pairs = merge_link_framing_for_panel(link_framing, pid)
@@ -2373,7 +2341,10 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
             host_framing = map_framing(host_doc)
 
         by_link = {}
+        source_container = None
         for link_inst, elem in pairs:
+            if source_container is None:
+                source_container = _read_container_value(elem) or pid
             key = link_inst.Id.IntegerValue
             if key not in by_link:
                 by_link[key] = (link_inst, [])
@@ -2383,6 +2354,11 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
         for link_inst, elem_ids in by_link.values():
             link_doc = link_inst.GetLinkDocument()
             if link_doc is None:
+                stats["errors"].append(
+                    "{}: structural link not loaded — reload link and retry".format(
+                        label
+                    )
+                )
                 continue
             transform = link_inst.GetTotalTransform()
             src_ids = List[DB.ElementId]()
@@ -2400,18 +2376,30 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
                     host_doc, list(new_ids)
                 )
                 stats["groups_exploded"] += exploded
+                label_pid = source_container or pid
                 for el in flat:
-                    set_panel_labels(el, pid)
+                    set_panel_labels(el, label_pid, known_pids=known_pids)
                     stats["members_copied"] += 1
                     panel_copied = True
             except Exception as ex:
-                stats["errors"].append("{}: {}".format(label, ex))
+                stats["errors"].append(
+                    "{}: {}".format(label, _short_revit_error(ex))
+                )
 
         if panel_copied:
-            stats["panels"] += 1
-            copied_pids.append(pid)
-            stats["copied_pids"] = copied_pids
-            host_framing = map_framing(host_doc)
+            post_count = len(
+                merge_framing_for_panel(map_framing(host_doc), pid)
+            )
+            if post_count == 0:
+                stats["errors"].append(
+                    "{}: copy finished but host framing not found — "
+                    "check BIMSF_Container on link members".format(label)
+                )
+            else:
+                stats["panels"] += 1
+                copied_pids.append(pid)
+                stats["copied_pids"] = copied_pids
+                host_framing = map_framing(host_doc)
 
     if regroup and view is not None and copied_pids:
         try:
