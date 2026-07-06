@@ -90,15 +90,16 @@ def choose_panels(rows, crossing_count, mode_host=True):
 
 
 def _is_framing_primary_doc(doc):
-    """True when this IS the framing link file opened directly."""
+    """True only for a standalone structural file (no MEP, no links)."""
     if doc.IsLinked:
         return False
-    has_links = (
+    if (
         DB.FilteredElementCollector(doc)
         .OfClass(DB.RevitLinkInstance)
         .GetElementCount()
-    )
-    if has_links > 0:
+    ) > 0:
+        return False
+    if pu.doc_has_mep_content(doc):
         return False
     return bool(pu.map_framing(doc))
 

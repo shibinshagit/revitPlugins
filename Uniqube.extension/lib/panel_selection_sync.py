@@ -75,7 +75,7 @@ def _host_group_name_for_element(host_doc, elem):
             return None
         grp = host_doc.GetElement(gid)
         if grp is not None and isinstance(grp, DB.Group):
-            return grp.Name
+            return pu.group_label(grp)
     except Exception:
         pass
     return None
@@ -94,7 +94,7 @@ def _host_container_for_panel(host_doc, pid):
         .OfClass(DB.Group)
         .ToElements()
     ):
-        if pu.group_matches_panel(g.Name, pid):
+        if pu.group_matches_panel(pu.group_label(g), pid):
             return g
     return None
 
@@ -118,6 +118,41 @@ def _selection_includes_container(uidoc, container):
     except Exception:
         pass
     return False
+
+
+def _assembly_fully_selected(uidoc, asm):
+    """True when every assembly member is already in the selection."""
+    if asm is None:
+        return False
+    try:
+        if asm.Id.IntegerValue in {
+            eid.IntegerValue for eid in uidoc.Selection.GetElementIds()
+        }:
+            return True
+    except Exception:
+        pass
+    try:
+        required = {
+            mid.IntegerValue for mid in asm.GetMemberIds()
+        }
+    except Exception:
+        return False
+    if not required:
+        return False
+    try:
+        selected = {
+            eid.IntegerValue for eid in uidoc.Selection.GetElementIds()
+        }
+    except Exception:
+        return False
+    return required.issubset(selected) and len(selected) == len(required)
+
+
+def _panel_fully_selected(uidoc, host_doc, pid):
+    container = _host_container_for_panel(host_doc, pid)
+    if isinstance(container, DB.AssemblyInstance):
+        return _assembly_fully_selected(uidoc, container)
+    return _selection_includes_container(uidoc, container)
 
 
 def detect_panel_from_selection(uidoc, host_doc):
@@ -214,11 +249,7 @@ def _process_selection(uidoc):
         return
 
     panel_key = _panel_key(pid)
-    if panel_key == _last_panel_key:
-        return
-
-    host_container = _host_container_for_panel(doc, pid)
-    if _selection_includes_container(uidoc, host_container):
+    if _panel_fully_selected(uidoc, doc, pid):
         _last_panel_key = panel_key
         return
 
