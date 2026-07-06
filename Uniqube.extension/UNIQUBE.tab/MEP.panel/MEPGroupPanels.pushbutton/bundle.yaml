@@ -1,5 +1,5 @@
 title: "Prepare\nMEP Panels"
 tooltip: >-
-  One step: auto-fill BIMSF_Container on MEP, group panels, copy linked
-  framing into host, regroup panel + MEP, and turn on click-to-select sync.
+  One step: auto-fill BIMSF_Container on MEP, copy linked framing into host,
+  create panel + MEP assemblies (for IGS/IFC export), and turn on selection sync.
 author: Uniqube

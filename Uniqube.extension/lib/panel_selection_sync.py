@@ -5,6 +5,7 @@ Uses UIApplication.Idling (works on all Revit versions — UIDocument
 does not expose SelectionChanged in older releases).
 """
 from System import EventHandler
+from System.Collections.Generic import List
 from Autodesk.Revit.UI.Events import IdlingEventArgs
 from pyrevit import DB
 
@@ -73,6 +74,21 @@ def _host_group_name_for_element(host_doc, elem):
     return None
 
 
+def _host_assembly_for_panel(host_doc, pid):
+    for asm in (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    ):
+        try:
+            asm_name = asm.AssemblyTypeName
+        except Exception:
+            asm_name = ""
+        if pu.assembly_matches_panel(asm_name, pid):
+            return asm
+    return None
+
+
 def _host_group_for_panel(host_doc, pid):
     for g in (
         DB.FilteredElementCollector(host_doc)
@@ -84,13 +100,13 @@ def _host_group_for_panel(host_doc, pid):
     return None
 
 
-def _selection_includes_group(uidoc, group):
-    if group is None:
+def _selection_includes_container(uidoc, container):
+    if container is None:
         return False
-    gid = group.Id.IntegerValue
+    cid = container.Id.IntegerValue
     try:
         for eid in uidoc.Selection.GetElementIds():
-            if eid.IntegerValue == gid:
+            if eid.IntegerValue == cid:
                 return True
     except Exception:
         pass
@@ -98,11 +114,15 @@ def _selection_includes_group(uidoc, group):
         for ref in uidoc.Selection.GetReferences():
             if ref.LinkedElementId != DB.ElementId.InvalidElementId:
                 continue
-            if ref.ElementId.IntegerValue == gid:
+            if ref.ElementId.IntegerValue == cid:
                 return True
     except Exception:
         pass
     return False
+
+
+def _selection_includes_group(uidoc, group):
+    return _selection_includes_container(uidoc, group)
 
 
 def detect_panel_from_selection(uidoc, host_doc):
@@ -116,6 +136,15 @@ def detect_panel_from_selection(uidoc, host_doc):
         if isinstance(el, DB.Group):
             panels.append(pu.panel_display_name(el.Name))
             continue
+        if isinstance(el, DB.AssemblyInstance):
+            try:
+                asm_name = el.AssemblyTypeName
+                if asm_name.startswith("BIMSF_Panel_"):
+                    asm_name = asm_name[len("BIMSF_Panel_"):]
+                panels.append(pu.panel_display_name(asm_name))
+            except Exception:
+                pass
+            continue
         c = _container_value(el)
         if c:
             panels.append(c)
@@ -123,6 +152,18 @@ def detect_panel_from_selection(uidoc, host_doc):
         gname = _host_group_name_for_element(host_doc, el)
         if gname:
             panels.append(pu.panel_display_name(gname))
+            continue
+        try:
+            asm_id = el.AssemblyInstanceId
+            if asm_id is not None and asm_id != DB.ElementId.InvalidElementId:
+                asm = host_doc.GetElement(asm_id)
+                if isinstance(asm, DB.AssemblyInstance):
+                    asm_name = asm.AssemblyTypeName
+                    if asm_name.startswith("BIMSF_Panel_"):
+                        asm_name = asm_name[len("BIMSF_Panel_"):]
+                    panels.append(pu.panel_display_name(asm_name))
+        except Exception:
+            pass
 
     invalid = DB.ElementId.InvalidElementId
     for ref in uidoc.Selection.GetReferences():
@@ -196,6 +237,11 @@ def _process_selection(uidoc):
     if panel_key == _last_panel_key:
         return
 
+    host_asm = _host_assembly_for_panel(doc, pid)
+    if host_asm is not None and _selection_includes_container(uidoc, host_asm):
+        _last_panel_key = panel_key
+        return
+
     host_group = _host_group_for_panel(doc, pid)
     if _selection_includes_group(uidoc, host_group):
         _last_panel_key = panel_key
@@ -204,7 +250,12 @@ def _process_selection(uidoc):
     try:
         _syncing = True
         link_framing = _cached_link_framing(doc)
-        pu.select_panel_pair(uidoc, doc, pid, link_framing)
+        if host_asm is not None:
+            uidoc.Selection.SetElementIds(
+                List[DB.ElementId]([host_asm.Id])
+            )
+        else:
+            pu.select_panel_pair(uidoc, doc, pid, link_framing)
         _last_panel_key = panel_key
     except Exception:
         _last_panel_key = panel_key

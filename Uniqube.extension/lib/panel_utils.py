@@ -99,6 +99,24 @@ def group_matches_panel(group_name, panel_id):
     return panel_ids_match(strip_group_prefix(group_name), panel_id)
 
 
+def panel_assembly_name(container):
+    """Assembly type name for a panel (matches Panel Combine Assembly)."""
+    return "BIMSF_Panel_{}".format((container or "").strip())
+
+
+def assembly_matches_panel(assembly_type_name, panel_id):
+    """True if an assembly type name belongs to the given panel id."""
+    if not assembly_type_name or not panel_id:
+        return False
+    if assembly_type_name == panel_assembly_name(panel_id):
+        return True
+    prefix = "BIMSF_Panel_"
+    if assembly_type_name.startswith(prefix):
+        asm_panel = assembly_type_name[len(prefix):].strip()
+        return panel_ids_match(asm_panel, panel_id)
+    return panel_ids_match(strip_group_prefix(assembly_type_name), panel_id)
+
+
 MEP_CATS = [
     DB.BuiltInCategory.OST_Conduit,
     DB.BuiltInCategory.OST_ConduitFitting,
@@ -1385,6 +1403,25 @@ def _delete_groups_in_doc(doc, selected):
                         pass
 
 
+def _delete_assemblies_in_doc(doc, selected):
+    """Remove existing panel assemblies without deleting member elements."""
+    for asm in (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    ):
+        for pid in selected:
+            try:
+                asm_name = asm.AssemblyTypeName
+            except Exception:
+                asm_name = ""
+            if assembly_matches_panel(asm_name, pid):
+                try:
+                    doc.Delete(asm.Id)
+                except Exception:
+                    pass
+
+
 class _CopyUseDestinationTypes(DB.IDuplicateTypeNamesHandler):
     """Auto-resolve duplicate type names during copy (no modal dialog)."""
 
@@ -1511,22 +1548,39 @@ def _open_document_for_edit(app, path):
         return None, False, False
 
 
-def group_framing_in_active_doc(doc, selected):
-    """Group panel framing in the active (primary) document."""
+def group_framing_in_active_doc(doc, selected, use_assembly=False):
+    """Group or assemble panel framing in the active (primary) document."""
     framing = map_framing(doc)
     stats = {"link_groups": 0, "errors": []}
-    t = DB.Transaction(doc, "UNIQUBE: Group Panel Framing")
+    label = "Assemble" if use_assembly else "Group"
+    t = DB.Transaction(doc, "UNIQUBE: {} Panel Framing".format(label))
     try:
         t.Start()
         _delete_groups_in_doc(doc, selected)
+        if use_assembly:
+            _delete_assemblies_in_doc(doc, selected)
+        naming_cat = DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
         for pid in selected:
-            group_ids = List[DB.ElementId]()
+            member_ids = List[DB.ElementId]()
             for el in merge_framing_for_panel(framing, pid):
-                group_ids.Add(el.Id)
-            if group_ids.Count > 1:
-                grp = doc.Create.NewGroup(group_ids)
-                grp.GroupType.Name = panel_group_name(pid)
+                member_ids.Add(el.Id)
+            if member_ids.Count <= 1:
+                continue
+            try:
+                if use_assembly:
+                    new_asm = DB.AssemblyInstance.Create(
+                        doc, member_ids, naming_cat
+                    )
+                    doc.Regenerate()
+                    new_asm.AssemblyTypeName = panel_assembly_name(pid)
+                else:
+                    grp = doc.Create.NewGroup(member_ids)
+                    grp.GroupType.Name = panel_group_name(pid)
                 stats["link_groups"] += 1
+            except Exception as ex:
+                stats["errors"].append(
+                    "{}: {}".format(panel_display_name(pid), ex)
+                )
         t.Commit()
     except Exception as ex:
         stats["errors"].append(str(ex))
@@ -1638,7 +1692,7 @@ def reload_links_for_paths(host_doc, paths):
 
 
 def select_panel_pair(uidoc, host_doc, pid, link_framing):
-    """Select ONE panel's host group; include link only if framing is still linked."""
+    """Select ONE panel's host assembly/group; link group only if still linked."""
     refs = List[DB.Reference]()
     host_framing = map_framing(host_doc)
     host_only = bool(merge_framing_for_panel(host_framing, pid))
@@ -1647,6 +1701,27 @@ def select_panel_pair(uidoc, host_doc, pid, link_framing):
         .OfClass(DB.RevitLinkInstance)
         .ToElements()
     )
+
+    host_asm = None
+    for asm in (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    ):
+        try:
+            asm_name = asm.AssemblyTypeName
+        except Exception:
+            asm_name = ""
+        if assembly_matches_panel(asm_name, pid):
+            host_asm = asm
+            break
+
+    if host_asm is not None:
+        try:
+            uidoc.Selection.SetElementIds(List[DB.ElementId]([host_asm.Id]))
+            return 1
+        except Exception:
+            pass
 
     for g in (
         DB.FilteredElementCollector(host_doc)
@@ -1713,12 +1788,13 @@ def combine_panels_group_color(
     link_zones,
     link_framing=None,
     tag_mep=True,
+    use_assembly=False,
 ):
-    """Group host panel + MEP and color like Panel Combine (Color).
+    """Combine host panel + MEP and color like Panel Combine (Color).
 
-    Host framing and MEP go into Revit groups. Linked panel framing is
-    colored in the active view and should be grouped in the link file via
-    group_link_panel_framing(). Panel-crossing pipes/fittings (enter/exit panel) red.
+    Host framing and MEP go into Revit assemblies (Prepare MEP Panels) or
+    groups (legacy). Linked panel framing is colored in the active view.
+    Panel-crossing pipes/fittings (enter/exit panel) are marked red.
     """
     if link_framing is None:
         link_framing = map_link_framing_by_container(doc)
@@ -1807,13 +1883,22 @@ def combine_panels_group_color(
         has_link = bool(merge_link_framing_for_panel(link_framing, pid))
         if group_ids.Count > 1:
             try:
-                new_grp = doc.Create.NewGroup(group_ids)
-                new_grp.GroupType.Name = panel_group_name(pid)
+                if use_assembly:
+                    naming_cat = DB.ElementId(
+                        DB.BuiltInCategory.OST_StructuralFraming
+                    )
+                    new_asm = DB.AssemblyInstance.Create(
+                        doc, group_ids, naming_cat
+                    )
+                    doc.Regenerate()
+                    new_asm.AssemblyTypeName = panel_assembly_name(pid)
+                else:
+                    new_grp = doc.Create.NewGroup(group_ids)
+                    new_grp.GroupType.Name = panel_group_name(pid)
                 stats["groups"] += 1
             except Exception as ex:
-                stats["group_errors"].append(
-                    "{}: {}".format(panel_group_name(pid), ex)
-                )
+                label = panel_assembly_name(pid) if use_assembly else panel_group_name(pid)
+                stats["group_errors"].append("{}: {}".format(label, ex))
         elif group_ids.Count == 1 and not has_link:
             stats["skipped_empty"] += 1
         elif group_ids.Count == 0 and not has_link:
@@ -1901,6 +1986,20 @@ def _flatten_copied_elements(host_doc, element_ids):
 def _remove_host_framing_for_panel(host_doc, pid):
     """Delete copied host framing for one panel so link copy can run again."""
     removed = 0
+    for asm in (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    ):
+        try:
+            asm_name = asm.AssemblyTypeName
+        except Exception:
+            asm_name = ""
+        if assembly_matches_panel(asm_name, pid):
+            try:
+                host_doc.Delete(asm.Id)
+            except Exception:
+                pass
     for el in merge_framing_for_panel(map_framing(host_doc), pid):
         try:
             gid = el.GroupId
@@ -2036,12 +2135,14 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
     return stats
 
 
-def regroup_panels_in_host(host_doc, view, selected, tag_mep=True):
-    """Rebuild host panel groups (framing + MEP) after copy or regroup."""
+def regroup_panels_in_host(host_doc, view, selected, tag_mep=True, use_assembly=False):
+    """Rebuild host panel assemblies/groups (framing + MEP) after copy."""
     panel_elements = map_framing(host_doc)
     link_zones = map_framing_from_links(host_doc)
     remaining_link = map_link_framing_by_container(host_doc)
     _delete_groups_in_doc(host_doc, selected)
+    if use_assembly:
+        _delete_assemblies_in_doc(host_doc, selected)
     return combine_panels_group_color(
         host_doc,
         view,
@@ -2050,6 +2151,7 @@ def regroup_panels_in_host(host_doc, view, selected, tag_mep=True):
         link_zones,
         link_framing=remaining_link,
         tag_mep=tag_mep,
+        use_assembly=use_assembly,
     )
 
 
@@ -2063,6 +2165,19 @@ def verify_panel_copy(host_doc, panel_ids):
         host_count = len(merge_framing_for_panel(host_framing, pid))
         link_count = len(merge_link_framing_for_panel(link_framing, pid))
         has_group = False
+        has_assembly = False
+        for asm in (
+            DB.FilteredElementCollector(host_doc)
+            .OfClass(DB.AssemblyInstance)
+            .ToElements()
+        ):
+            try:
+                asm_name = asm.AssemblyTypeName
+            except Exception:
+                asm_name = ""
+            if assembly_matches_panel(asm_name, pid):
+                has_assembly = True
+                break
         for g in (
             DB.FilteredElementCollector(host_doc)
             .OfClass(DB.Group)
@@ -2071,10 +2186,10 @@ def verify_panel_copy(host_doc, panel_ids):
             if group_matches_panel(g.Name, pid):
                 has_group = True
                 break
-        if host_count and has_group:
-            status = "OK — in host, grouped"
+        if host_count and (has_assembly or has_group):
+            status = "OK — in host, assembled" if has_assembly else "OK — in host, grouped"
         elif host_count:
-            status = "Partial — host framing, no group"
+            status = "Partial — host framing, no assembly/group"
         elif link_count:
             status = "Not copied — still in link only"
         else:
@@ -2083,7 +2198,7 @@ def verify_panel_copy(host_doc, panel_ids):
             "panel": label,
             "host_framing": host_count,
             "link_framing": link_count,
-            "host_group": has_group,
+            "host_group": has_group or has_assembly,
             "status": status,
         })
     return rows
