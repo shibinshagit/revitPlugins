@@ -149,6 +149,16 @@ def _assembly_fully_selected(uidoc, asm):
 
 
 def _panel_fully_selected(uidoc, host_doc, pid):
+    required = pu._host_panel_member_ids(host_doc, pid)
+    if required:
+        try:
+            selected = {
+                eid.IntegerValue for eid in uidoc.Selection.GetElementIds()
+            }
+        except Exception:
+            selected = set()
+        if required.issubset(selected) and len(selected) == len(required):
+            return True
     container = _host_container_for_panel(host_doc, pid)
     if isinstance(container, DB.AssemblyInstance):
         return _assembly_fully_selected(uidoc, container)
