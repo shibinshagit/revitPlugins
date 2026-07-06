@@ -62,6 +62,14 @@ def _container_value(elem):
 
 def _host_group_name_for_element(host_doc, elem):
     try:
+        aid = elem.AssemblyInstanceId
+        if aid is not None and aid != DB.ElementId.InvalidElementId:
+            asm = host_doc.GetElement(aid)
+            if asm is not None and isinstance(asm, DB.AssemblyInstance):
+                return asm.AssemblyTypeName
+    except Exception:
+        pass
+    try:
         gid = elem.GroupId
         if gid is None or gid == DB.ElementId.InvalidElementId:
             return None
@@ -73,7 +81,14 @@ def _host_group_name_for_element(host_doc, elem):
     return None
 
 
-def _host_group_for_panel(host_doc, pid):
+def _host_container_for_panel(host_doc, pid):
+    for asm in (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    ):
+        if pu.assembly_matches_panel(asm.AssemblyTypeName, pid):
+            return asm
     for g in (
         DB.FilteredElementCollector(host_doc)
         .OfClass(DB.Group)
@@ -84,13 +99,13 @@ def _host_group_for_panel(host_doc, pid):
     return None
 
 
-def _selection_includes_group(uidoc, group):
-    if group is None:
+def _selection_includes_container(uidoc, container):
+    if container is None:
         return False
-    gid = group.Id.IntegerValue
+    cid = container.Id.IntegerValue
     try:
         for eid in uidoc.Selection.GetElementIds():
-            if eid.IntegerValue == gid:
+            if eid.IntegerValue == cid:
                 return True
     except Exception:
         pass
@@ -98,7 +113,7 @@ def _selection_includes_group(uidoc, group):
         for ref in uidoc.Selection.GetReferences():
             if ref.LinkedElementId != DB.ElementId.InvalidElementId:
                 continue
-            if ref.ElementId.IntegerValue == gid:
+            if ref.ElementId.IntegerValue == cid:
                 return True
     except Exception:
         pass
@@ -112,6 +127,9 @@ def detect_panel_from_selection(uidoc, host_doc):
     for eid in uidoc.Selection.GetElementIds():
         el = host_doc.GetElement(eid)
         if el is None:
+            continue
+        if isinstance(el, DB.AssemblyInstance):
+            panels.append(pu.panel_display_name(el.AssemblyTypeName))
             continue
         if isinstance(el, DB.Group):
             panels.append(pu.panel_display_name(el.Name))
@@ -140,6 +158,9 @@ def detect_panel_from_selection(uidoc, host_doc):
             continue
         elem = link_doc.GetElement(link_elem_id)
         if elem is None:
+            continue
+        if isinstance(elem, DB.AssemblyInstance):
+            panels.append(pu.panel_display_name(elem.AssemblyTypeName))
             continue
         if isinstance(elem, DB.Group):
             panels.append(pu.panel_display_name(elem.Name))
@@ -196,8 +217,8 @@ def _process_selection(uidoc):
     if panel_key == _last_panel_key:
         return
 
-    host_group = _host_group_for_panel(doc, pid)
-    if _selection_includes_group(uidoc, host_group):
+    host_container = _host_container_for_panel(doc, pid)
+    if _selection_includes_container(uidoc, host_container):
         _last_panel_key = panel_key
         return
 
