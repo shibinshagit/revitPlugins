@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""One-step MEP panel prep: assemble, copy framing to host, enable sync (Task 5).
+"""One-step MEP panel prep: group, copy framing to host, enable sync (Task 5).
 
-Host MEP model: tags MEP, copies linked panel framing into host, creates
-Revit assemblies (panel + MEP) for IGS/IFC export, turns on click-to-select sync.
+Host MEP model: groups MEP, copies linked panel framing into host, regroups
+panel + MEP together, turns on click-to-select sync.
 
-Framing link model (open .rvt directly): creates panel framing assemblies only.
+Framing link model (open .rvt directly): groups panel framing only.
 """
 from pyrevit import revit, DB, forms, script
 from System.Windows.Controls import CheckBox
@@ -42,14 +42,14 @@ class MEPPanelSelector(forms.WPFWindow):
             self.summary_text.Text = (
                 "{0} panel(s). {1} panel-crossing pipes/fittings (red). "
                 "Auto-fills BIMSF_Container, copies panel framing from link, "
-                "creates panel + MEP assemblies in host, and turns on selection sync.".format(
+                "groups panel + MEP in host, and turns on selection sync.".format(
                     len(rows), crossing_count
                 )
             )
         else:
             self.summary_text.Text = (
                 "{0} panel(s) in this framing model. "
-                "Creates one Revit assembly per panel.".format(len(rows))
+                "Creates one Revit group per panel.".format(len(rows))
             )
 
         for row in rows:
@@ -90,16 +90,15 @@ def choose_panels(rows, crossing_count, mode_host=True):
 
 
 def _is_framing_primary_doc(doc):
-    """True only for a standalone structural file (no MEP, no links)."""
+    """True when this IS the framing link file opened directly."""
     if doc.IsLinked:
         return False
-    if (
+    has_links = (
         DB.FilteredElementCollector(doc)
         .OfClass(DB.RevitLinkInstance)
         .GetElementCount()
-    ) > 0:
-        return False
-    if pu.doc_has_mep_content(doc):
+    )
+    if has_links > 0:
         return False
     return bool(pu.map_framing(doc))
 
@@ -117,13 +116,12 @@ def _disable_sync():
 
 def _run_framing_doc(selected):
     stats = {"link_groups": 0, "errors": []}
-    with revit.Transaction("UNIQUBE: Assemble Panel Framing"):
+    with revit.Transaction("UNIQUBE: Group Panel Framing"):
         pu._delete_groups_in_doc(doc, selected)
-        pu._delete_assemblies_in_doc(doc, selected)
-        stats = pu.group_framing_in_active_doc(doc, selected, use_assembly=True)
+        stats = pu.group_framing_in_active_doc(doc, selected)
     msg = (
         "Done (framing model).\n\n"
-        "Panel assemblies created: {}\n\n"
+        "Panel groups created: {}\n\n"
         "Next: open the MEP host model and run Prepare MEP Panels "
         "there for the same panels.".format(
             stats.get("link_groups", 0)
@@ -184,9 +182,8 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         link_zones = pu.map_framing_from_links(doc)
         link_framing = pu.map_link_framing_by_container(doc)
 
-        with revit.Transaction("UNIQUBE: Assemble Panel + MEP"):
+        with revit.Transaction("UNIQUBE: Group Panel + MEP"):
             pu._delete_groups_in_doc(doc, selected)
-            pu._delete_assemblies_in_doc(doc, selected)
             group_stats = pu.combine_panels_group_color(
                 doc,
                 view,
@@ -195,7 +192,6 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
                 link_zones,
                 link_framing=link_framing,
                 tag_mep=True,
-                use_assembly=True,
             )
             copy_stats["host_groups"] = group_stats.get("groups", 0)
 
@@ -222,7 +218,7 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         "2. Via connected runs: {2} | Resolved: {3} | Crossing cleared: {4} | Outside cleared: {10}\n"
         "3. Panels copied to host: {5}\n"
         "4. Framing members copied: {6}\n"
-        "5. Host assemblies (panel + MEP): {7}\n"
+        "5. Host groups (panel + MEP): {7}\n"
         "6. Panel crossings (red pipes/fittings): {8}\n"
         "7. Selection sync: {9}".format(
             tag_stats.get("tagged", 0),
@@ -259,11 +255,7 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         + copy_stats.get("errors", [])
     )
     if errors:
-        msg += "\n\nAssembly issues:\n" + "\n".join(errors[:8])
-        msg += (
-            "\n\nTip: dissolve any old Model Groups for these panels "
-            "in Revit, then run Prepare MEP Panels again."
-        )
+        msg += "\n\nIssues:\n" + "\n".join(errors[:8])
 
     if copy_stats.get("panels", 0) > 0:
         msg += (
