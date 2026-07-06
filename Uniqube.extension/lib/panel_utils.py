@@ -134,6 +134,93 @@ def _short_revit_error(ex):
     return msg
 
 
+def _is_structural_framing(elem):
+    cat = elem.Category if elem is not None else None
+    if cat is None:
+        return False
+    try:
+        return cat.BuiltInCategory == DB.BuiltInCategory.OST_StructuralFraming
+    except Exception:
+        try:
+            return cat.Id.IntegerValue == int(
+                DB.BuiltInCategory.OST_StructuralFraming
+            )
+        except Exception:
+            return False
+
+
+def _element_in_assembly(elem):
+    invalid = DB.ElementId.InvalidElementId
+    try:
+        aid = elem.AssemblyInstanceId
+        return aid is not None and aid != invalid
+    except Exception:
+        return False
+
+
+def _element_in_group(elem):
+    invalid = DB.ElementId.InvalidElementId
+    try:
+        gid = elem.GroupId
+        return gid is not None and gid != invalid
+    except Exception:
+        return False
+
+
+def _ungroup_all_containing_members(doc, target_ints):
+    """Dissolve every model group that includes any target element."""
+    for _pass in range(30):
+        changed = False
+        for group in (
+            DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements()
+        ):
+            try:
+                member_ids = list(group.GetMemberIds())
+            except Exception:
+                continue
+            if not any(mid.IntegerValue in target_ints for mid in member_ids):
+                continue
+            changed = True
+            try:
+                group.UngroupMembers()
+            except Exception:
+                try:
+                    doc.Delete(group.Id)
+                except Exception:
+                    pass
+        if not changed:
+            break
+        try:
+            doc.Regenerate()
+        except Exception:
+            pass
+
+
+def _assembly_container_name(doc, pid, id_list):
+    """Use the link/MWF container string verbatim (asterisk kept)."""
+    for eid in id_list:
+        el = doc.GetElement(eid)
+        val = _read_container_value(el)
+        if val:
+            return val
+    return panel_group_name(pid)
+
+
+def _filter_assembly_ready_members(doc, id_list):
+    """Keep only ungrouped structural framing not already in an assembly."""
+    ready = List[DB.ElementId]()
+    for eid in id_list:
+        el = doc.GetElement(eid)
+        if el is None:
+            continue
+        if not _is_structural_framing(el):
+            continue
+        if _element_in_assembly(el) or _element_in_group(el):
+            continue
+        ready.Add(eid)
+    return ready
+
+
 def doc_has_mep_content(doc):
     """True when the document contains any host MEP elements."""
     for cat in MEP_CATS:
@@ -1449,32 +1536,8 @@ def _delete_groups_in_doc(doc, selected):
 
 def _release_elements_for_assembly(doc, element_ids):
     """Ungroup elements so AssemblyInstance.Create can succeed."""
-    invalid = DB.ElementId.InvalidElementId
-    for _pass in range(20):
-        any_grouped = False
-        for eid in element_ids:
-            elem = doc.GetElement(eid)
-            if elem is None:
-                continue
-            gid = elem.GroupId
-            if gid is None or gid == invalid:
-                continue
-            group = doc.GetElement(gid)
-            if group is not None and isinstance(group, DB.Group):
-                any_grouped = True
-                try:
-                    group.UngroupMembers()
-                except Exception:
-                    try:
-                        doc.Delete(group.Id)
-                    except Exception:
-                        pass
-        if not any_grouped:
-            break
-        try:
-            doc.Regenerate()
-        except Exception:
-            pass
+    target = _member_id_ints(element_ids)
+    _ungroup_all_containing_members(doc, target)
 
 
 def _member_id_ints(member_ids):
@@ -1521,34 +1584,16 @@ def _release_members_from_assemblies(doc, member_ids):
             doc.Delete(DB.ElementId(aid))
         except Exception:
             pass
+    if to_delete:
+        try:
+            doc.Regenerate()
+        except Exception:
+            pass
 
 
 def _assembly_naming_category(doc, id_list):
-    invalid = DB.ElementId.InvalidElementId
-    for eid in id_list:
-        el = doc.GetElement(eid)
-        if el and el.Category:
-            try:
-                if el.Category.BuiltInCategory == DB.BuiltInCategory.OST_StructuralFraming:
-                    return el.Category.Id
-            except Exception:
-                pass
-    for eid in id_list:
-        el = doc.GetElement(eid)
-        if el and el.Category and el.Category.Id != invalid:
-            return el.Category.Id
+    """Fixed structural framing category — matches Create Assemblies tool."""
     return DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
-
-
-def _create_panel_group_fallback(doc, pid, id_list):
-    _release_elements_for_assembly(doc, id_list)
-    try:
-        doc.Regenerate()
-    except Exception:
-        pass
-    new_grp = doc.Create.NewGroup(id_list)
-    new_grp.GroupType.Name = panel_group_name(pid)
-    return new_grp
 
 
 def _prepare_members_for_assembly(doc, pid, member_ids):
@@ -1559,9 +1604,10 @@ def _prepare_members_for_assembly(doc, pid, member_ids):
     if id_list.Count <= 1:
         return id_list, "need at least 2 elements"
 
+    target = _member_id_ints(id_list)
     _release_members_from_assemblies(doc, id_list)
     _delete_groups_in_doc(doc, [pid])
-    _release_elements_for_assembly(doc, id_list)
+    _ungroup_all_containing_members(doc, target)
     try:
         doc.Regenerate()
     except Exception:
@@ -1570,34 +1616,56 @@ def _prepare_members_for_assembly(doc, pid, member_ids):
 
 
 def _create_panel_assembly(doc, pid, member_ids):
-    """Create panel assembly from framing members; fall back to model group.
-
-    MEP is intentionally excluded — Revit often rejects mixed framing/MEP
-    assemblies and connected MEP cannot be model-grouped reliably.
-    Returns (ok, message).
-    """
+    """Create a Revit assembly from host framing members. Returns (ok, message)."""
     id_list, prep_err = _prepare_members_for_assembly(doc, pid, member_ids)
     if prep_err:
         return False, prep_err
 
-    naming_cat = _assembly_naming_category(doc, id_list)
-    errors = []
-
+    target = _member_id_ints(id_list)
+    _ungroup_all_containing_members(doc, target)
     try:
-        new_asm = DB.AssemblyInstance.Create(doc, id_list, naming_cat)
         doc.Regenerate()
-        new_asm.AssemblyTypeName = panel_group_name(pid)
-        return True, None
-    except Exception as ex:
-        errors.append(_short_revit_error(ex))
+    except Exception:
+        pass
+
+    ready = _filter_assembly_ready_members(doc, id_list)
+    if ready.Count <= 1:
+        blocked = id_list.Count - ready.Count
+        if blocked:
+            return False, (
+                "only {} framing members ready for assembly "
+                "({} still grouped or in another assembly)".format(
+                    ready.Count, blocked
+                )
+            )
+        return False, "need at least 2 ungrouped framing members"
+
+    naming_cat = _assembly_naming_category(doc, ready)
+    container_name = _assembly_container_name(doc, pid, ready)
 
     try:
-        _create_panel_group_fallback(doc, pid, id_list)
-        return True, "Revit assembly failed — created model group instead"
+        new_asm = DB.AssemblyInstance.Create(doc, ready, naming_cat)
+        doc.Regenerate()
     except Exception as ex:
-        errors.append(_short_revit_error(ex))
+        return False, _short_revit_error(ex)
 
-    return False, errors[0] if len(errors) == 1 else "; ".join(errors[:3])
+    try:
+        new_asm.AssemblyTypeName = container_name
+        doc.Regenerate()
+    except Exception as ex:
+        _set_container(new_asm, container_name)
+        return True, "assembly created; rename failed: {}".format(
+            _short_revit_error(ex)
+        )
+
+    _set_container(new_asm, container_name)
+    mk = new_asm.LookupParameter("Mark")
+    if mk and not mk.IsReadOnly:
+        try:
+            mk.Set(panel_display_name(container_name))
+        except Exception:
+            pass
+    return True, None
 
 
 def _delete_assemblies_in_doc(doc, selected):
@@ -1620,6 +1688,17 @@ def _clear_panel_containers_in_doc(doc, selected):
     """Remove existing panel groups and assemblies for a clean re-run."""
     _delete_groups_in_doc(doc, selected)
     _delete_assemblies_in_doc(doc, selected)
+    target = set()
+    framing = map_framing(doc)
+    for pid in selected:
+        for el in merge_framing_for_panel(framing, pid):
+            target.add(el.Id.IntegerValue)
+    if target:
+        _ungroup_all_containing_members(doc, target)
+        try:
+            doc.Regenerate()
+        except Exception:
+            pass
 
 
 class _CopyUseDestinationTypes(DB.IDuplicateTypeNamesHandler):
@@ -2441,26 +2520,35 @@ def verify_panel_copy(host_doc, panel_ids):
         label = panel_display_name(pid)
         host_count = len(merge_framing_for_panel(host_framing, pid))
         link_count = len(merge_link_framing_for_panel(link_framing, pid))
-        has_group = False
+        has_asm = False
+        has_model_group = False
         for asm in (
             DB.FilteredElementCollector(host_doc)
             .OfClass(DB.AssemblyInstance)
             .ToElements()
         ):
             if assembly_matches_panel(asm.AssemblyTypeName, pid):
-                has_group = True
+                has_asm = True
                 break
-        if not has_group:
+            try:
+                if assembly_matches_panel(asm.Name, pid):
+                    has_asm = True
+                    break
+            except Exception:
+                pass
+        if not has_asm:
             for g in (
                 DB.FilteredElementCollector(host_doc)
                 .OfClass(DB.Group)
                 .ToElements()
             ):
                 if group_matches_panel(group_label(g), pid):
-                    has_group = True
+                    has_model_group = True
                     break
-        if host_count and has_group:
-            status = "OK — in host, assembled"
+        if host_count and has_asm:
+            status = "OK — in host, assembly"
+        elif host_count and has_model_group:
+            status = "Partial — model group only (dissolve and retry)"
         elif host_count:
             status = "Partial — host framing, no assembly"
         elif link_count:
@@ -2471,7 +2559,7 @@ def verify_panel_copy(host_doc, panel_ids):
             "panel": label,
             "host_framing": host_count,
             "link_framing": link_count,
-            "host_group": has_group,
+            "host_group": has_asm,
             "status": status,
         })
     return rows
