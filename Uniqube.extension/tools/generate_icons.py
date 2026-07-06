@@ -85,6 +85,9 @@ ICON_MAP = {
     "UNIQUBE.tab/Structural.panel/MasterPanelList.pushbutton": (
         "clipboard-task-24-regular", True
     ),
+    "UNIQUBE.tab/Structural.panel/CNCExtraction.pushbutton": (
+        "arrow-export-24-regular", False
+    ),
     "UNIQUBE.tab/MEP.panel/BOMExtraction.pushbutton": (
         "document-table-24-regular", False
     ),

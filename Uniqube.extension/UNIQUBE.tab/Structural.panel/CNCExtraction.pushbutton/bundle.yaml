@@ -1,0 +1,5 @@
+title: CNC Extraction
+tooltip: >-
+  Export roll-forming CNC CSV files (ONYX format) for selected truss assemblies
+  or wall panels — profile, length, coordinates, and punch/feature positions.
+author: Uniqube
