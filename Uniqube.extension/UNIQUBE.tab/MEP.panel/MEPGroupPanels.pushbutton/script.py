@@ -90,15 +90,16 @@ def choose_panels(rows, crossing_count, mode_host=True):
 
 
 def _is_framing_primary_doc(doc):
-    """True when this IS the framing link file opened directly."""
+    """True only for a standalone structural file (no MEP, no links)."""
     if doc.IsLinked:
         return False
-    has_links = (
+    if (
         DB.FilteredElementCollector(doc)
         .OfClass(DB.RevitLinkInstance)
         .GetElementCount()
-    )
-    if has_links > 0:
+    ) > 0:
+        return False
+    if pu.doc_has_mep_content(doc):
         return False
     return bool(pu.map_framing(doc))
 
@@ -258,7 +259,11 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         + copy_stats.get("errors", [])
     )
     if errors:
-        msg += "\n\nIssues:\n" + "\n".join(errors[:8])
+        msg += "\n\nAssembly issues:\n" + "\n".join(errors[:8])
+        msg += (
+            "\n\nTip: dissolve any old Model Groups for these panels "
+            "in Revit, then run Prepare MEP Panels again."
+        )
 
     if copy_stats.get("panels", 0) > 0:
         msg += (

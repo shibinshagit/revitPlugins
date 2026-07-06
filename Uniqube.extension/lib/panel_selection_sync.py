@@ -95,7 +95,7 @@ def _host_group_for_panel(host_doc, pid):
         .OfClass(DB.Group)
         .ToElements()
     ):
-        if pu.group_matches_panel(g.Name, pid):
+        if pu.group_matches_panel(pu.group_label(g), pid):
             return g
     return None
 

@@ -99,6 +99,37 @@ def group_matches_panel(group_name, panel_id):
     return panel_ids_match(strip_group_prefix(group_name), panel_id)
 
 
+def group_label(group):
+    """Return the display/type name for a Revit group."""
+    try:
+        group_type = group.GroupType
+        if group_type is not None and group_type.Name:
+            return group_type.Name
+    except Exception:
+        pass
+    try:
+        return group.Name or ""
+    except Exception:
+        return ""
+
+
+def doc_has_mep_content(doc):
+    """True when the document contains any host MEP elements."""
+    for cat in MEP_CATS:
+        try:
+            count = (
+                DB.FilteredElementCollector(doc)
+                .OfCategory(cat)
+                .WhereElementIsNotElementType()
+                .GetElementCount()
+            )
+            if count > 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def panel_assembly_name(container):
     """Assembly type name for a panel (matches Panel Combine Assembly)."""
     return "BIMSF_Panel_{}".format((container or "").strip())
@@ -1391,16 +1422,65 @@ def _view_color_kit(doc):
 
 def _delete_groups_in_doc(doc, selected):
     """Dissolve existing panel groups without deleting member elements."""
-    for g in DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements():
-        for pid in selected:
-            if group_matches_panel(g.Name, pid):
+    for _pass in range(12):
+        found = False
+        for group in (
+            DB.FilteredElementCollector(doc).OfClass(DB.Group).ToElements()
+        ):
+            label = group_label(group)
+            for pid in selected:
+                if not group_matches_panel(label, pid):
+                    continue
+                found = True
                 try:
-                    g.UngroupMembers()
+                    group.UngroupMembers()
                 except Exception:
                     try:
-                        doc.Delete(g.Id)
+                        doc.Delete(group.Id)
                     except Exception:
                         pass
+                break
+        if not found:
+            break
+
+
+def _release_elements_for_assembly(doc, element_ids):
+    """Ungroup elements so AssemblyInstance.Create can succeed."""
+    for _pass in range(12):
+        any_grouped = False
+        for eid in element_ids:
+            elem = doc.GetElement(eid)
+            if elem is None:
+                continue
+            gid = elem.GroupId
+            if gid is None or gid == DB.ElementId.InvalidElementId:
+                continue
+            group = doc.GetElement(gid)
+            if group is not None and isinstance(group, DB.Group):
+                any_grouped = True
+                try:
+                    group.UngroupMembers()
+                except Exception:
+                    pass
+        if not any_grouped:
+            break
+
+
+def _create_panel_assembly(doc, pid, member_ids):
+    """Create one BIMSF panel assembly; returns the instance or None."""
+    id_list = List[DB.ElementId]()
+    for eid in member_ids:
+        if eid is not None:
+            id_list.Add(eid)
+    if id_list.Count <= 1:
+        return None
+
+    _release_elements_for_assembly(doc, id_list)
+    naming_cat = DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
+    new_asm = DB.AssemblyInstance.Create(doc, id_list, naming_cat)
+    doc.Regenerate()
+    new_asm.AssemblyTypeName = panel_assembly_name(pid)
+    return new_asm
 
 
 def _delete_assemblies_in_doc(doc, selected):
@@ -1559,7 +1639,6 @@ def group_framing_in_active_doc(doc, selected, use_assembly=False):
         _delete_groups_in_doc(doc, selected)
         if use_assembly:
             _delete_assemblies_in_doc(doc, selected)
-        naming_cat = DB.ElementId(DB.BuiltInCategory.OST_StructuralFraming)
         for pid in selected:
             member_ids = List[DB.ElementId]()
             for el in merge_framing_for_panel(framing, pid):
@@ -1568,11 +1647,7 @@ def group_framing_in_active_doc(doc, selected, use_assembly=False):
                 continue
             try:
                 if use_assembly:
-                    new_asm = DB.AssemblyInstance.Create(
-                        doc, member_ids, naming_cat
-                    )
-                    doc.Regenerate()
-                    new_asm.AssemblyTypeName = panel_assembly_name(pid)
+                    _create_panel_assembly(doc, pid, member_ids)
                 else:
                     grp = doc.Create.NewGroup(member_ids)
                     grp.GroupType.Name = panel_group_name(pid)
@@ -1728,7 +1803,7 @@ def select_panel_pair(uidoc, host_doc, pid, link_framing):
         .OfClass(DB.Group)
         .ToElements()
     ):
-        if not group_matches_panel(g.Name, pid):
+        if not group_matches_panel(group_label(g), pid):
             continue
         try:
             refs.Add(DB.Reference(g))
@@ -1752,7 +1827,7 @@ def select_panel_pair(uidoc, host_doc, pid, link_framing):
             .OfClass(DB.Group)
             .ToElements()
         ):
-            if not group_matches_panel(g.Name, pid):
+            if not group_matches_panel(group_label(g), pid):
                 continue
             try:
                 refs.Add(DB.Reference(g).CreateLinkReference(link_inst))
@@ -1884,20 +1959,18 @@ def combine_panels_group_color(
         if group_ids.Count > 1:
             try:
                 if use_assembly:
-                    naming_cat = DB.ElementId(
-                        DB.BuiltInCategory.OST_StructuralFraming
-                    )
-                    new_asm = DB.AssemblyInstance.Create(
-                        doc, group_ids, naming_cat
-                    )
-                    doc.Regenerate()
-                    new_asm.AssemblyTypeName = panel_assembly_name(pid)
+                    _create_panel_assembly(doc, pid, group_ids)
+                    _delete_groups_in_doc(doc, [pid])
                 else:
                     new_grp = doc.Create.NewGroup(group_ids)
                     new_grp.GroupType.Name = panel_group_name(pid)
                 stats["groups"] += 1
             except Exception as ex:
-                label = panel_assembly_name(pid) if use_assembly else panel_group_name(pid)
+                label = (
+                    panel_assembly_name(pid)
+                    if use_assembly
+                    else panel_group_name(pid)
+                )
                 stats["group_errors"].append("{}: {}".format(label, ex))
         elif group_ids.Count == 1 and not has_link:
             stats["skipped_empty"] += 1
@@ -2183,7 +2256,7 @@ def verify_panel_copy(host_doc, panel_ids):
             .OfClass(DB.Group)
             .ToElements()
         ):
-            if group_matches_panel(g.Name, pid):
+            if group_matches_panel(group_label(g), pid):
                 has_group = True
                 break
         if host_count and (has_assembly or has_group):
