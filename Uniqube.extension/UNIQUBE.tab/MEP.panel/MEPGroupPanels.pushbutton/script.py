@@ -217,7 +217,7 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         "2. Via connected runs: {2} | Resolved: {3} | Crossing cleared: {4} | Outside cleared: {10}\n"
         "3. Panels copied to host: {5}\n"
         "4. Framing members copied: {6}\n"
-        "5. Host assemblies (framing): {7}\n"
+        "5. Host assemblies (framing + MEP): {7}\n"
         "6. Panel crossings (red pipes/fittings): {8}\n"
         "7. Selection sync: {9}".format(
             tag_stats.get("tagged", 0),
@@ -269,6 +269,9 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
             "\n\nPanel framing is in the host model. "
             "You can remove the structural link (Manage Links → Remove) "
             "when Verify shows OK for each panel."
+            "\n\nTrimble Connect: export IFC with "
+            "IfcElementAssembly enabled — panel members appear under "
+            "BIMSF_Container / Panel Name on the assembly."
         )
     elif link_framing:
         msg += (

@@ -104,6 +104,29 @@ def assembly_matches_panel(assembly_name, panel_id):
     return group_matches_panel(assembly_name, panel_id)
 
 
+def host_assembly_for_panel(doc, pid):
+    """Return the host AssemblyInstance for one panel, if any."""
+    for asm in (
+        DB.FilteredElementCollector(doc)
+        .OfClass(DB.AssemblyInstance)
+        .ToElements()
+    ):
+        try:
+            if assembly_matches_panel(asm.AssemblyTypeName, pid):
+                return asm
+        except Exception:
+            pass
+        try:
+            if assembly_matches_panel(asm.Name, pid):
+                return asm
+        except Exception:
+            pass
+        container = _read_container_value(asm)
+        if container and panel_ids_match(container, pid):
+            return asm
+    return None
+
+
 def group_label(group):
     """Return the display/type name for a Revit group."""
     try:
@@ -1615,9 +1638,56 @@ def _prepare_members_for_assembly(doc, pid, member_ids):
     return id_list, None
 
 
-def _create_panel_assembly(doc, pid, member_ids):
-    """Create a Revit assembly from host framing members. Returns (ok, message)."""
-    id_list, prep_err = _prepare_members_for_assembly(doc, pid, member_ids)
+def _add_mep_members_to_assembly(doc, asm, mep_ids):
+    """Add panel MEP to an existing assembly one element at a time."""
+    added = 0
+    skipped = 0
+    if asm is None or mep_ids is None or mep_ids.Count == 0:
+        return added, skipped
+
+    for eid in mep_ids:
+        el = doc.GetElement(eid)
+        if el is None:
+            skipped += 1
+            continue
+        single = List[DB.ElementId]()
+        single.Add(eid)
+        target = {eid.IntegerValue}
+        _release_members_from_assemblies(doc, single)
+        _ungroup_all_containing_members(doc, target)
+        try:
+            doc.Regenerate()
+        except Exception:
+            pass
+        el = doc.GetElement(eid)
+        if el is None:
+            skipped += 1
+            continue
+        if _element_in_group(el):
+            skipped += 1
+            continue
+        batch = List[DB.ElementId]()
+        batch.Add(eid)
+        try:
+            asm.AddMemberIds(batch)
+            added += 1
+        except Exception:
+            skipped += 1
+
+    if added:
+        try:
+            doc.Regenerate()
+        except Exception:
+            pass
+    return added, skipped
+
+
+def _create_panel_assembly(doc, pid, framing_ids, mep_ids=None):
+    """Create a Revit assembly from framing, then add MEP members.
+
+    Returns (ok, message).
+    """
+    id_list, prep_err = _prepare_members_for_assembly(doc, pid, framing_ids)
     if prep_err:
         return False, prep_err
 
@@ -1649,39 +1719,74 @@ def _create_panel_assembly(doc, pid, member_ids):
     except Exception as ex:
         return False, _short_revit_error(ex)
 
+    mep_added = 0
+    mep_skipped = 0
+    if mep_ids is not None and mep_ids.Count > 0:
+        mep_added, mep_skipped = _add_mep_members_to_assembly(
+            doc, new_asm, mep_ids
+        )
+
     try:
         new_asm.AssemblyTypeName = container_name
         doc.Regenerate()
     except Exception as ex:
         _set_container(new_asm, container_name)
-        return True, "assembly created; rename failed: {}".format(
+        set_panel_labels(new_asm, container_name)
+        msg = "assembly created; rename failed: {}".format(
             _short_revit_error(ex)
         )
+        if mep_skipped:
+            msg += " (MEP in assembly: {})".format(mep_added)
+        return True, msg
 
     _set_container(new_asm, container_name)
+    set_panel_labels(new_asm, container_name)
     mk = new_asm.LookupParameter("Mark")
     if mk and not mk.IsReadOnly:
         try:
             mk.Set(panel_display_name(container_name))
         except Exception:
             pass
+
+    if mep_ids is not None and mep_ids.Count > 0:
+        if mep_added == 0:
+            return True, (
+                "framing assembly only — {} MEP could not join assembly".format(
+                    mep_skipped
+                )
+            )
+        if mep_skipped:
+            return True, (
+                "MEP in assembly: {} | outside assembly: {}".format(
+                    mep_added, mep_skipped
+                )
+            )
     return True, None
 
 
 def _delete_assemblies_in_doc(doc, selected):
     """Remove existing panel assemblies without deleting member elements."""
+    to_delete = set()
+    for pid in selected:
+        asm = host_assembly_for_panel(doc, pid)
+        if asm is not None:
+            to_delete.add(asm.Id.IntegerValue)
     for asm in (
         DB.FilteredElementCollector(doc)
         .OfClass(DB.AssemblyInstance)
         .ToElements()
     ):
+        if asm.Id.IntegerValue in to_delete:
+            continue
         for pid in selected:
             if assembly_matches_panel(asm.AssemblyTypeName, pid):
-                try:
-                    doc.Delete(asm.Id)
-                except Exception:
-                    pass
+                to_delete.add(asm.Id.IntegerValue)
                 break
+    for aid in to_delete:
+        try:
+            doc.Delete(DB.ElementId(aid))
+        except Exception:
+            pass
 
 
 def _clear_panel_containers_in_doc(doc, selected):
@@ -2041,7 +2146,17 @@ def _add_assembly_members_to_refs(host_doc, refs, asm):
 
 
 def select_panel_pair(uidoc, host_doc, pid, link_framing):
-    """Select all host panel members; include link framing when not copied yet."""
+    """Select the host panel assembly when present; else individual members."""
+    asm = host_assembly_for_panel(host_doc, pid)
+    if asm is not None:
+        ids = List[DB.ElementId]()
+        ids.Add(asm.Id)
+        uidoc.Selection.SetElementIds(ids)
+        try:
+            return len(list(asm.GetMemberIds())) + 1
+        except Exception:
+            return 1
+
     refs = List[DB.Reference]()
     host_framing = map_framing(host_doc)
     host_only = bool(merge_framing_for_panel(host_framing, pid))
@@ -2154,19 +2269,21 @@ def combine_panels_group_color(
     }
 
     processed_crossings = set()
-    added_to_group = set()
     _clear_panel_containers_in_doc(doc, selected)
 
     for pid in selected:
         settings = panel_settings()
-        group_ids = List[DB.ElementId]()
+        framing_ids = List[DB.ElementId]()
+        mep_ids = List[DB.ElementId]()
+        framing_seen = set()
+        mep_seen = set()
 
         for el in merge_framing_for_panel(panel_elements, pid):
             view.SetElementOverrides(el.Id, settings)
             eid = el.Id.IntegerValue
-            if eid not in added_to_group:
-                added_to_group.add(eid)
-                group_ids.Add(el.Id)
+            if eid not in framing_seen:
+                framing_seen.add(eid)
+                framing_ids.Add(el.Id)
                 stats["host_framing"] += 1
 
         for link_inst, elem in merge_link_framing_for_panel(link_framing, pid):
@@ -2193,9 +2310,9 @@ def combine_panels_group_color(
                     el, pid, interior_outlines, mep_assignments, valid_ids
                 ):
                     continue
-                if eid_int not in added_to_group:
-                    added_to_group.add(eid_int)
-                    group_ids.Add(eid)
+                if eid_int not in mep_seen:
+                    mep_seen.add(eid_int)
+                    mep_ids.Add(eid)
                 view.SetElementOverrides(eid, settings)
                 if tag_mep:
                     set_panel_labels(el, pid)
@@ -2218,13 +2335,12 @@ def combine_panels_group_color(
                 stats["crossing_count"] += 1
 
         has_link = bool(merge_link_framing_for_panel(link_framing, pid))
-        framing_ids = List[DB.ElementId]()
-        for el in merge_framing_for_panel(panel_elements, pid):
-            framing_ids.Add(el.Id)
 
         if framing_ids.Count >= 2:
             try:
-                ok, msg = _create_panel_assembly(doc, pid, framing_ids)
+                ok, msg = _create_panel_assembly(
+                    doc, pid, framing_ids, mep_ids
+                )
                 if ok:
                     stats["groups"] += 1
                     if msg:
@@ -2520,22 +2636,8 @@ def verify_panel_copy(host_doc, panel_ids):
         label = panel_display_name(pid)
         host_count = len(merge_framing_for_panel(host_framing, pid))
         link_count = len(merge_link_framing_for_panel(link_framing, pid))
-        has_asm = False
+        has_asm = host_assembly_for_panel(host_doc, pid) is not None
         has_model_group = False
-        for asm in (
-            DB.FilteredElementCollector(host_doc)
-            .OfClass(DB.AssemblyInstance)
-            .ToElements()
-        ):
-            if assembly_matches_panel(asm.AssemblyTypeName, pid):
-                has_asm = True
-                break
-            try:
-                if assembly_matches_panel(asm.Name, pid):
-                    has_asm = True
-                    break
-            except Exception:
-                pass
         if not has_asm:
             for g in (
                 DB.FilteredElementCollector(host_doc)

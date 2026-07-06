@@ -66,6 +66,9 @@ def _host_group_name_for_element(host_doc, elem):
         if aid is not None and aid != DB.ElementId.InvalidElementId:
             asm = host_doc.GetElement(aid)
             if asm is not None and isinstance(asm, DB.AssemblyInstance):
+                c = _container_value(asm)
+                if c:
+                    return c
                 return asm.AssemblyTypeName
     except Exception:
         pass
@@ -82,13 +85,9 @@ def _host_group_name_for_element(host_doc, elem):
 
 
 def _host_container_for_panel(host_doc, pid):
-    for asm in (
-        DB.FilteredElementCollector(host_doc)
-        .OfClass(DB.AssemblyInstance)
-        .ToElements()
-    ):
-        if pu.assembly_matches_panel(asm.AssemblyTypeName, pid):
-            return asm
+    asm = pu.host_assembly_for_panel(host_doc, pid)
+    if asm is not None:
+        return asm
     for g in (
         DB.FilteredElementCollector(host_doc)
         .OfClass(DB.Group)
@@ -149,6 +148,24 @@ def _assembly_fully_selected(uidoc, asm):
 
 
 def _panel_fully_selected(uidoc, host_doc, pid):
+    container = _host_container_for_panel(host_doc, pid)
+    if isinstance(container, DB.AssemblyInstance):
+        if _selection_includes_container(uidoc, container):
+            return True
+        try:
+            selected = {
+                eid.IntegerValue for eid in uidoc.Selection.GetElementIds()
+            }
+            member_ids = {
+                mid.IntegerValue for mid in container.GetMemberIds()
+            }
+            if member_ids and selected == member_ids:
+                return True
+        except Exception:
+            pass
+        return False
+    if isinstance(container, DB.Group):
+        return _selection_includes_container(uidoc, container)
     required = pu._host_panel_member_ids(host_doc, pid)
     if required:
         try:
@@ -159,9 +176,6 @@ def _panel_fully_selected(uidoc, host_doc, pid):
             selected = set()
         if required.issubset(selected) and len(selected) == len(required):
             return True
-    container = _host_container_for_panel(host_doc, pid)
-    if isinstance(container, DB.AssemblyInstance):
-        return _assembly_fully_selected(uidoc, container)
     return _selection_includes_container(uidoc, container)
 
 
@@ -174,8 +188,27 @@ def detect_panel_from_selection(uidoc, host_doc):
         if el is None:
             continue
         if isinstance(el, DB.AssemblyInstance):
-            panels.append(pu.panel_display_name(el.AssemblyTypeName))
+            c = _container_value(el)
+            if c:
+                panels.append(c)
+            else:
+                panels.append(pu.panel_display_name(el.AssemblyTypeName))
             continue
+        try:
+            aid = el.AssemblyInstanceId
+            if aid is not None and aid != DB.ElementId.InvalidElementId:
+                asm = host_doc.GetElement(aid)
+                if asm is not None and isinstance(asm, DB.AssemblyInstance):
+                    c = _container_value(asm)
+                    if c:
+                        panels.append(c)
+                    else:
+                        panels.append(
+                            pu.panel_display_name(asm.AssemblyTypeName)
+                        )
+                    continue
+        except Exception:
+            pass
         if isinstance(el, DB.Group):
             panels.append(pu.panel_display_name(el.Name))
             continue
