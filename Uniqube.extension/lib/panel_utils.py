@@ -908,6 +908,107 @@ def compute_panel_bbox(elements, link_bboxes=None):
     return min_pt, max_pt
 
 
+def _horizontal_run_ft(elem):
+    """Plan-view run length of a horizontal framing member, in feet."""
+    try:
+        loc = elem.Location
+        if not isinstance(loc, DB.LocationCurve):
+            return 0.0
+        curve = loc.Curve
+        if curve is None:
+            return 0.0
+        p0 = curve.GetEndPoint(0)
+        p1 = curve.GetEndPoint(1)
+        dx = p1.X - p0.X
+        dy = p1.Y - p0.Y
+        return (dx * dx + dy * dy) ** 0.5
+    except Exception:
+        return 0.0
+
+
+def compute_panel_dimensions(elements):
+    """Return (length, height, thickness) in feet for factory panel schedules.
+
+    Uses MWF / shop-drawing convention:
+    - Length = longest horizontal track/sill run (not full XY bbox).
+      Sloped top tracks often extend past end studs in bbox only (+39 mm).
+    - Height = Z span of horizontal tracks (stud tips excluded).
+    - Thickness = smallest plan extent from vertical member bboxes.
+    """
+    if not elements:
+        return None
+
+    horiz_runs = []
+    track_z_min = []
+    track_z_max = []
+    fallback_z_min = []
+    fallback_z_max = []
+    vert_x_min = vert_y_min = None
+    vert_x_max = vert_y_max = None
+    all_x_min = all_y_min = all_z_min = None
+    all_x_max = all_y_max = all_z_max = None
+
+    for el in elements:
+        bbox = el.get_BoundingBox(None)
+        if bbox is None:
+            continue
+        if all_x_min is None:
+            all_x_min, all_y_min, all_z_min = bbox.Min.X, bbox.Min.Y, bbox.Min.Z
+            all_x_max, all_y_max, all_z_max = bbox.Max.X, bbox.Max.Y, bbox.Max.Z
+        else:
+            all_x_min = min(all_x_min, bbox.Min.X)
+            all_y_min = min(all_y_min, bbox.Min.Y)
+            all_z_min = min(all_z_min, bbox.Min.Z)
+            all_x_max = max(all_x_max, bbox.Max.X)
+            all_y_max = max(all_y_max, bbox.Max.Y)
+            all_z_max = max(all_z_max, bbox.Max.Z)
+
+        fallback_z_min.append(bbox.Min.Z)
+        fallback_z_max.append(bbox.Max.Z)
+
+        if _framing_is_horizontal(el):
+            run = _horizontal_run_ft(el)
+            if run > 0.01:
+                horiz_runs.append(run)
+            track_z_min.append(bbox.Min.Z)
+            track_z_max.append(bbox.Max.Z)
+        else:
+            if vert_x_min is None:
+                vert_x_min, vert_y_min = bbox.Min.X, bbox.Min.Y
+                vert_x_max, vert_y_max = bbox.Max.X, bbox.Max.Y
+            else:
+                vert_x_min = min(vert_x_min, bbox.Min.X)
+                vert_y_min = min(vert_y_min, bbox.Min.Y)
+                vert_x_max = max(vert_x_max, bbox.Max.X)
+                vert_y_max = max(vert_y_max, bbox.Max.Y)
+
+    if track_z_min:
+        height = max(track_z_max) - min(track_z_min)
+    elif fallback_z_min:
+        height = max(fallback_z_max) - min(fallback_z_min)
+    else:
+        height = 0.0
+
+    if horiz_runs:
+        length = max(horiz_runs)
+    elif vert_x_min is not None:
+        length = max(vert_x_max - vert_x_min, vert_y_max - vert_y_min)
+    elif all_x_min is not None:
+        length = max(all_x_max - all_x_min, all_y_max - all_y_min)
+    else:
+        return None
+
+    if vert_x_min is not None:
+        thickness = min(vert_x_max - vert_x_min, vert_y_max - vert_y_min)
+    elif all_x_min is not None:
+        horiz = sorted([all_x_max - all_x_min, all_y_max - all_y_min])
+        thickness = horiz[0]
+    else:
+        thickness = 0.0
+
+    return (length, height, thickness)
+
+
 def _panel_outline(min_pt, max_pt):
     pad = DB.XYZ(ZONE_PAD_FT, ZONE_PAD_FT, ZONE_PAD_FT)
     return DB.Outline(min_pt.Subtract(pad), max_pt.Add(pad))

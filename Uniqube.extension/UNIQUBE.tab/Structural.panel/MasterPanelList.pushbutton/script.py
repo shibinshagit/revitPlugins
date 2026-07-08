@@ -131,28 +131,8 @@ def collect_units():
 
 
 def _panel_dims(elements):
-    """(length, height, thickness) in feet from combined bounding box."""
-    min_x = min_y = min_z = None
-    max_x = max_y = max_z = None
-    for el in elements:
-        bb = el.get_BoundingBox(None)
-        if bb is None:
-            continue
-        if min_x is None:
-            min_x, min_y, min_z = bb.Min.X, bb.Min.Y, bb.Min.Z
-            max_x, max_y, max_z = bb.Max.X, bb.Max.Y, bb.Max.Z
-        else:
-            min_x = min(min_x, bb.Min.X)
-            min_y = min(min_y, bb.Min.Y)
-            min_z = min(min_z, bb.Min.Z)
-            max_x = max(max_x, bb.Max.X)
-            max_y = max(max_y, bb.Max.Y)
-            max_z = max(max_z, bb.Max.Z)
-    if min_x is None:
-        return None
-    dx, dy, dz = (max_x - min_x), (max_y - min_y), (max_z - min_z)
-    horiz = sorted([dx, dy])
-    return (horiz[1], dz, horiz[0])  # length, height, thickness
+    """(length, height, thickness) in feet — shop-drawing convention."""
+    return pu.compute_panel_dimensions(elements)
 
 
 def _get_volume_ft3(elem):
