@@ -446,6 +446,24 @@ def _curve_sample_points(elem):
     return points
 
 
+def _curve_dense_sample_points(elem, steps=41):
+    """Finer centerline samples — catches short exit stubs through tracks."""
+    loc = elem.Location
+    if isinstance(loc, DB.LocationCurve):
+        curve = loc.Curve
+        if curve is not None:
+            points = []
+            denom = float(max(steps - 1, 1))
+            for i in range(steps):
+                try:
+                    points.append(curve.Evaluate(i / denom, True))
+                except Exception:
+                    continue
+            if points:
+                return points
+    return _curve_sample_points(elem)
+
+
 def _point_in_outline_xy(pt, outline, tol=None):
     if tol is None:
         tol = INTERIOR_TOL_FT
@@ -512,12 +530,50 @@ def _panels_matching(pid, panel_set):
     return any(panel_ids_match(pid, p) for p in panel_set)
 
 
-def _curve_fully_inside_panel(el, panel_outlines, pid):
-    """True when both curve endpoints lie inside the given panel volume."""
+def _curve_pierces_track_envelope(el, pid, panel_outlines, track_spans):
+    """True when any part of a run extends outside the panel track envelope."""
+    span = track_spans.get(pid) if track_spans else None
+    outline = panel_outlines.get(pid)
+    if not span or outline is None:
+        return False
+    z0, z1 = span
+    tol = INTERIOR_TOL_FT
+    for pt in _curve_dense_sample_points(el):
+        if not _point_in_outline_xy(pt, outline, tol):
+            continue
+        if pt.Z > z1 + tol or pt.Z < z0 - tol:
+            return True
+    bbox = el.get_BoundingBox(None)
+    if bbox is not None:
+        for x in (bbox.Min.X, bbox.Max.X):
+            for y in (bbox.Min.Y, bbox.Max.Y):
+                for z in (bbox.Min.Z, bbox.Max.Z):
+                    pt = DB.XYZ(x, y, z)
+                    if not _point_in_outline_xy(pt, outline, tol):
+                        continue
+                    if z > z1 + tol or z < z0 - tol:
+                        return True
+    return False
+
+
+def _curve_fully_inside_panel(el, panel_outlines, pid, track_spans=None):
+    """True when the full run stays inside the panel track/interior volume."""
     if not _is_linear_mep_curve(el):
         return _panels_matching(pid, _location_panels(el, panel_outlines))
     start_p, end_p = _endpoint_panels(el, panel_outlines)
-    return _panels_matching(pid, start_p) and _panels_matching(pid, end_p)
+    if not (
+        _panels_matching(pid, start_p) and _panels_matching(pid, end_p)
+    ):
+        return False
+    if _curve_samples_outside_panel(
+        el, panel_outlines, pid, track_spans
+    ):
+        return False
+    if track_spans and _curve_pierces_track_envelope(
+        el, pid, panel_outlines, track_spans
+    ):
+        return False
+    return True
 
 
 def _mep_belongs_in_panel(
@@ -638,13 +694,25 @@ def _fitting_on_crossing_run(el, panel_outlines, valid_ids, track_spans=None):
 
 
 def _mep_belongs_in_assembly(
-    el, pid, panel_outlines, host_assignments, valid_ids
+    el, pid, panel_outlines, host_assignments, valid_ids, track_spans=None
 ):
     """MEP members for Revit assembly — fully inside panel, no exit fittings."""
     if _is_linear_mep_curve(el):
-        return _curve_fully_inside_panel(el, panel_outlines, pid)
+        if _is_panel_crossing_for_color(
+            el,
+            panel_outlines,
+            track_spans,
+            valid_ids,
+            host_assignments,
+        ):
+            return False
+        return _curve_fully_inside_panel(
+            el, panel_outlines, pid, track_spans
+        )
     if _is_mep_connection(el):
-        if _fitting_on_crossing_run(el, panel_outlines, valid_ids):
+        if _fitting_on_crossing_run(
+            el, panel_outlines, valid_ids, track_spans
+        ):
             return False
         return _fitting_serves_panel_run(
             el, pid, host_assignments, panel_outlines, valid_ids
@@ -979,6 +1047,14 @@ def _is_panel_crossing_for_color(
     """Red view override: linear runs that exit the panel, not outside-only pieces."""
     if not _is_linear_mep_curve(el):
         return False
+    if track_spans:
+        start_p, end_p = _endpoint_panels(el, panel_outlines)
+        touched = _panels_touched_by_curve(el, panel_outlines, start_p, end_p)
+        for pid in touched:
+            if _curve_pierces_track_envelope(
+                el, pid, panel_outlines, track_spans
+            ):
+                return True
     if _connectors_cross_panel_boundary(el, panel_outlines):
         return True
     if track_spans and _connectors_cross_track_boundary(
@@ -1015,7 +1091,7 @@ def _mep_belongs_in_panel_for_color(
                 el, panel_outlines, track_spans
             ):
                 return False
-        return _curve_fully_inside_panel(el, panel_outlines, pid)
+        return _curve_fully_inside_panel(el, panel_outlines, pid, track_spans)
     return _mep_belongs_in_panel(
         el, pid, panel_outlines, host_assignments, valid_ids
     )
@@ -1046,17 +1122,21 @@ def _connectors_cross_panel_boundary(el, panel_outlines):
     return any(inside_flags) and not all(inside_flags)
 
 
-def _curve_samples_outside_panel(el, panel_outlines, pid):
-    """True when any mid-span point lies outside the panel interior box."""
+def _curve_samples_outside_panel(el, panel_outlines, pid, track_spans=None):
+    """True when any part of the run leaves the panel or track envelope."""
     outline = panel_outlines.get(pid)
     if outline is None:
         return False
-    samples = _curve_sample_points(el)
+    samples = _curve_dense_sample_points(el)
     if len(samples) < 2:
         return False
     for pt in samples[1:-1]:
         if not _point_in_outline(pt, outline):
             return True
+    if track_spans and _curve_pierces_track_envelope(
+        el, pid, panel_outlines, track_spans
+    ):
+        return True
     return False
 
 
@@ -1081,7 +1161,7 @@ def _curve_exceeds_track_envelope(el, panel_outlines, track_spans, limit_pids=No
             continue
         inside_env = False
         outside_env = False
-        for pt in _curve_sample_points(el):
+        for pt in _curve_dense_sample_points(el):
             if not _point_in_outline_xy(pt, outline, tol):
                 continue
             if z0 - tol <= pt.Z <= z1 + tol:
@@ -1147,11 +1227,18 @@ def _curve_crosses_panel_boundary(el, panel_outlines, track_spans=None):
         common = start_p & end_p
         panels = common if common else (start_p if start_p == end_p else set())
         for pid in panels:
-            if _curve_samples_outside_panel(el, panel_outlines, pid):
+            if _curve_samples_outside_panel(
+                el, panel_outlines, pid, track_spans
+            ):
                 return True
 
     touched = _panels_touched_by_curve(el, panel_outlines, start_p, end_p)
     if track_spans and touched:
+        for pid in touched:
+            if _curve_pierces_track_envelope(
+                el, pid, panel_outlines, track_spans
+            ):
+                return True
         if _curve_exceeds_track_envelope(
             el, panel_outlines, track_spans, touched
         ):
@@ -3280,7 +3367,12 @@ def combine_panels_group_color(
                 ):
                     continue
                 if not _mep_belongs_in_assembly(
-                    el, pid, interior_outlines, mep_assignments, valid_ids
+                    el,
+                    pid,
+                    interior_outlines,
+                    mep_assignments,
+                    valid_ids,
+                    resolved_track_spans,
                 ):
                     if tag_mep:
                         _clear_container(el)
