@@ -1676,11 +1676,17 @@ def _member_id_ints(member_ids):
     return ints
 
 
-def _release_members_from_assemblies(doc, member_ids):
+def _release_members_from_assemblies(doc, member_ids, keep_asm_id=None):
     """Remove elements from any existing assembly that would block a new one."""
     invalid = DB.ElementId.InvalidElementId
     to_delete = set()
     target = _member_id_ints(member_ids)
+    keep_int = None
+    if keep_asm_id is not None:
+        try:
+            keep_int = keep_asm_id.IntegerValue
+        except Exception:
+            keep_int = int(keep_asm_id)
 
     for asm in (
         DB.FilteredElementCollector(doc)
@@ -1702,6 +1708,9 @@ def _release_members_from_assemblies(doc, member_ids):
         aid = elem.AssemblyInstanceId
         if aid is not None and aid != invalid:
             to_delete.add(aid.IntegerValue)
+
+    if keep_int is not None:
+        to_delete.discard(keep_int)
 
     for aid in to_delete:
         try:
@@ -1746,6 +1755,7 @@ def _add_mep_members_to_assembly(doc, asm, mep_ids):
     if asm is None or mep_ids is None or mep_ids.Count == 0:
         return added, skipped
 
+    asm_id = asm.Id
     for eid in mep_ids:
         el = doc.GetElement(eid)
         if el is None:
@@ -1754,17 +1764,17 @@ def _add_mep_members_to_assembly(doc, asm, mep_ids):
         single = List[DB.ElementId]()
         single.Add(eid)
         target = {eid.IntegerValue}
-        _release_members_from_assemblies(doc, single)
+        _release_members_from_assemblies(doc, single, keep_asm_id=asm_id)
         _ungroup_all_containing_members(doc, target)
-        try:
-            doc.Regenerate()
-        except Exception:
-            pass
         el = doc.GetElement(eid)
         if el is None:
             skipped += 1
             continue
         if _element_in_group(el):
+            skipped += 1
+            continue
+        asm = doc.GetElement(asm_id)
+        if asm is None:
             skipped += 1
             continue
         batch = List[DB.ElementId]()
@@ -1839,11 +1849,16 @@ def _create_panel_assembly(doc, pid, framing_ids, mep_ids=None):
 
     new_asm = doc.GetElement(asm_id)
     if new_asm is None:
-        return False, "assembly lost after adding members"
+        new_asm = host_assembly_for_panel(doc, pid)
+    if new_asm is None:
+        return True, (
+            "framing copied; assembly not finalized — "
+            "MEP in assembly: {}".format(mep_added)
+        )
 
     try:
         doc.Regenerate()
-        new_asm = doc.GetElement(asm_id)
+        new_asm = doc.GetElement(new_asm.Id)
         if new_asm is not None:
             new_asm.AssemblyTypeName = container_name
         doc.Regenerate()
@@ -2393,6 +2408,24 @@ def combine_panels_group_color(
                 framing_ids.Add(el.Id)
                 stats["host_framing"] += 1
 
+        if framing_ids.Count == 0 and count_host_framing_for_panel(doc, pid) > 0:
+            for el in (
+                DB.FilteredElementCollector(doc)
+                .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
+                .WhereElementIsNotElementType()
+                .ToElements()
+            ):
+                val = _read_container_value(el)
+                if not (val and panel_ids_match(val, pid)):
+                    continue
+                eid = el.Id.IntegerValue
+                if eid in framing_seen:
+                    continue
+                framing_seen.add(eid)
+                framing_ids.Add(el.Id)
+                view.SetElementOverrides(el.Id, settings)
+                stats["host_framing"] += 1
+
         for link_inst, elem in merge_link_framing_for_panel(link_framing, pid):
             if set_link_element_override(view, link_inst, elem, settings):
                 stats["link_framing_colored"] += 1
@@ -2909,9 +2942,7 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
                 )
 
         if panel_copied:
-            post_count = len(
-                merge_framing_for_panel(map_framing(host_doc), pid)
-            )
+            post_count = count_host_framing_for_panel(host_doc, pid)
             if post_count == 0:
                 stats["errors"].append(
                     "{}: copy finished but host framing not found — "
@@ -2954,6 +2985,25 @@ def regroup_panels_in_host(host_doc, view, selected, tag_mep=True):
     )
 
 
+def count_host_framing_for_panel(host_doc, pid):
+    """Count host structural framing for one panel (by container or assembly)."""
+    count = len(merge_framing_for_panel(map_framing(host_doc), pid))
+    if count:
+        return count
+    asm = host_assembly_for_panel(host_doc, pid)
+    if asm is None:
+        return 0
+    n = 0
+    try:
+        for mid in asm.GetMemberIds():
+            el = host_doc.GetElement(mid)
+            if el is not None and _is_framing_element(el):
+                n += 1
+    except Exception:
+        pass
+    return n
+
+
 def verify_panel_copy(host_doc, panel_ids):
     """Return per-panel copy status for UI / debugging."""
     host_framing = map_framing(host_doc)
@@ -2961,7 +3011,7 @@ def verify_panel_copy(host_doc, panel_ids):
     rows = []
     for pid in panel_ids:
         label = panel_display_name(pid)
-        host_count = len(merge_framing_for_panel(host_framing, pid))
+        host_count = count_host_framing_for_panel(host_doc, pid)
         link_count = len(merge_link_framing_for_panel(link_framing, pid))
         has_asm = host_assembly_for_panel(host_doc, pid) is not None
         has_model_group = False

@@ -152,8 +152,6 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
     }
     group_stats = {}
 
-    tg = DB.TransactionGroup(doc, "UNIQUBE: Prepare MEP Panels")
-    tg.Start()
     try:
         with revit.Transaction("UNIQUBE: Fill BIMSF_Container"):
             tag_stats = pu.fill_mep_bimsf_containers(
@@ -193,11 +191,7 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
                 tag_mep=True,
             )
             copy_stats["host_groups"] = group_stats.get("groups", 0)
-
-        tg.Assimilate()
     except Exception as ex:
-        if tg.HasStarted() and not tg.HasEnded():
-            tg.RollBack()
         forms.alert("Prepare MEP Panels failed:\n{}".format(ex), title="UNIQUBE")
         return
 
