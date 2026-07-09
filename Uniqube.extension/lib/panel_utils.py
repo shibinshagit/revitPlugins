@@ -473,6 +473,39 @@ def _fitting_serves_panel_run(el, pid, host_assignments, panel_outlines, valid_i
     return False
 
 
+def _fitting_on_crossing_run(el, panel_outlines, valid_ids):
+    """True when a fitting joins any run that exits the panel (exit elbows/tees)."""
+    if not _is_mep_connection(el):
+        return False
+    for nb in _mep_network_neighbors(el, valid_ids):
+        if isinstance(nb, DB.MEPCurve) and _curve_crosses_panel_boundary(
+            nb, panel_outlines
+        ):
+            return True
+    return False
+
+
+def _mep_belongs_in_assembly(
+    el, pid, panel_outlines, host_assignments, valid_ids
+):
+    """MEP members for Revit assembly — fully inside panel, no exit fittings."""
+    if isinstance(el, DB.MEPCurve):
+        return _curve_fully_inside_panel(el, panel_outlines, pid)
+    if _is_mep_connection(el):
+        if _fitting_on_crossing_run(el, panel_outlines, valid_ids):
+            return False
+        return _fitting_serves_panel_run(
+            el, pid, host_assignments, panel_outlines, valid_ids
+        )
+    if _is_panel_crossing_connection(
+        el, host_assignments, panel_outlines, valid_ids
+    ):
+        return False
+    return _mep_belongs_in_panel(
+        el, pid, panel_outlines, host_assignments, valid_ids
+    )
+
+
 def _mep_touches_panel_zone(
     el, panel_outlines, host_assignments=None, valid_ids=None
 ):
@@ -2191,6 +2224,24 @@ def _host_panel_member_ids(host_doc, pid):
     ids = set()
     for el in merge_framing_for_panel(map_framing(host_doc), pid):
         ids.add(el.Id.IntegerValue)
+
+    asm = host_assembly_for_panel(host_doc, pid)
+    if asm is not None:
+        try:
+            for mid in asm.GetMemberIds():
+                ids.add(mid.IntegerValue)
+        except Exception:
+            pass
+        return ids
+
+    panel_elements = map_framing(host_doc)
+    link_zones = map_framing_from_links(host_doc)
+    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
+    mep_assignments, _, _, _ = assign_mep_to_panels(
+        host_doc, panel_elements, link_zones
+    )
+    valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
+
     for cat in MEP_CATS:
         try:
             elements = (
@@ -2207,8 +2258,73 @@ def _host_panel_member_ids(host_doc, pid):
                 continue
             if not panel_ids_match(p.AsString(), pid):
                 continue
+            if not _mep_belongs_in_assembly(
+                el, pid, interior_outlines, mep_assignments, valid_ids
+            ):
+                continue
             ids.add(el.Id.IntegerValue)
     return ids
+
+
+def _append_host_panel_mep_refs(host_doc, refs, pid, seen):
+    """Add host MEP refs for one panel, excluding exit fittings."""
+    asm = host_assembly_for_panel(host_doc, pid)
+    if asm is not None:
+        try:
+            for mid in asm.GetMemberIds():
+                el = host_doc.GetElement(mid)
+                if el is None or el.Category is None:
+                    continue
+                if el.Category.BuiltInCategory not in MEP_CATS:
+                    continue
+                i = mid.IntegerValue
+                if i in seen:
+                    continue
+                seen.add(i)
+                try:
+                    refs.Add(DB.Reference(el))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return
+
+    panel_elements = map_framing(host_doc)
+    link_zones = map_framing_from_links(host_doc)
+    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
+    mep_assignments, _, _, _ = assign_mep_to_panels(
+        host_doc, panel_elements, link_zones
+    )
+    valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
+
+    for cat in MEP_CATS:
+        try:
+            elements = (
+                DB.FilteredElementCollector(host_doc)
+                .OfCategory(cat)
+                .WhereElementIsNotElementType()
+                .ToElements()
+            )
+        except Exception:
+            continue
+        for el in elements:
+            p = el.LookupParameter(PARAM_NAME)
+            if not (p and p.HasValue and p.AsString()):
+                continue
+            if not panel_ids_match(p.AsString(), pid):
+                continue
+            if not _mep_belongs_in_assembly(
+                el, pid, interior_outlines, mep_assignments, valid_ids
+            ):
+                continue
+            i = el.Id.IntegerValue
+            if i in seen:
+                continue
+            seen.add(i)
+            try:
+                refs.Add(DB.Reference(el))
+            except Exception:
+                pass
 
 
 def _append_host_panel_refs(host_doc, refs, pid):
@@ -2223,30 +2339,7 @@ def _append_host_panel_refs(host_doc, refs, pid):
             refs.Add(DB.Reference(el))
         except Exception:
             pass
-    for cat in MEP_CATS:
-        try:
-            elements = (
-                DB.FilteredElementCollector(host_doc)
-                .OfCategory(cat)
-                .WhereElementIsNotElementType()
-                .ToElements()
-            )
-        except Exception:
-            continue
-        for el in elements:
-            p = el.LookupParameter(PARAM_NAME)
-            if not (p and p.HasValue and p.AsString()):
-                continue
-            if not panel_ids_match(p.AsString(), pid):
-                continue
-            i = el.Id.IntegerValue
-            if i in seen:
-                continue
-            seen.add(i)
-            try:
-                refs.Add(DB.Reference(el))
-            except Exception:
-                pass
+    _append_host_panel_mep_refs(host_doc, refs, pid, seen)
 
 
 def _add_assembly_members_to_refs(host_doc, refs, asm):
@@ -2445,10 +2538,26 @@ def combine_panels_group_color(
                 if tag_mep:
                     _clear_container(el)
                 continue
+            if _fitting_on_crossing_run(
+                el, interior_outlines, valid_ids
+            ):
+                if eid not in processed_crossings:
+                    view.SetElementOverrides(eid, red_settings)
+                    processed_crossings.add(eid)
+                    stats["crossing_count"] += 1
+                if tag_mep:
+                    _clear_container(el)
+                continue
             if _assignment_matches_panel(pids, pid):
                 if not _mep_belongs_in_panel(
                     el, pid, interior_outlines, mep_assignments, valid_ids
                 ):
+                    continue
+                if not _mep_belongs_in_assembly(
+                    el, pid, interior_outlines, mep_assignments, valid_ids
+                ):
+                    if tag_mep:
+                        _clear_container(el)
                     continue
                 if eid_int not in mep_seen:
                     mep_seen.add(eid_int)
