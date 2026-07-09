@@ -617,6 +617,12 @@ def _fitting_on_crossing_run(el, panel_outlines, valid_ids, track_spans=None):
         return False
     if _is_inline_fitting(el):
         return False
+    if track_spans and _connectors_cross_track_boundary(
+        el, panel_outlines, track_spans
+    ):
+        return True
+    if _connectors_cross_panel_boundary(el, panel_outlines):
+        return True
     for nb in _mep_network_neighbors(el, valid_ids):
         if _is_linear_mep_curve(nb) and _curve_crosses_panel_boundary(
             nb, panel_outlines, track_spans
@@ -658,6 +664,100 @@ def _mep_touches_panel_zone(
                 nb, panel_outlines
             ):
                 return True
+    return False
+
+
+def _is_conduit_element(el):
+    """True for conduit runs and conduit fittings."""
+    cat = el.Category
+    if cat is None:
+        return False
+    try:
+        return cat.BuiltInCategory in (
+            DB.BuiltInCategory.OST_Conduit,
+            DB.BuiltInCategory.OST_ConduitFitting,
+        )
+    except Exception:
+        return False
+
+
+def _point_in_track_envelope(pt, outline, z0, z1, tol=None):
+    if tol is None:
+        tol = INTERIOR_TOL_FT
+    return (
+        _point_in_outline_xy(pt, outline, tol)
+        and z0 - tol <= pt.Z <= z1 + tol
+    )
+
+
+def _connectors_cross_track_boundary(
+    el, panel_outlines, track_spans, limit_pids=None
+):
+    """True when connectors split inside/outside the track envelope."""
+    if not track_spans:
+        return False
+    cm = _get_mep_connector_manager(el)
+    if cm is None:
+        return False
+    try:
+        connectors = list(cm.Connectors)
+    except Exception:
+        return False
+    if not connectors:
+        return False
+    tol = INTERIOR_TOL_FT
+    if limit_pids:
+        pid_list = [
+            pid for pid in limit_pids
+            if pid in track_spans and track_spans[pid]
+        ]
+    else:
+        pid_list = [pid for pid, span in track_spans.items() if span]
+
+    for pid in pid_list:
+        z0, z1 = track_spans[pid]
+        outline = panel_outlines.get(pid)
+        if outline is None:
+            continue
+        in_env = []
+        for conn in connectors:
+            try:
+                pt = conn.Origin
+            except Exception:
+                continue
+            if not _point_in_outline_xy(pt, outline, tol):
+                continue
+            in_env.append(z0 - tol <= pt.Z <= z1 + tol)
+        if in_env and any(in_env) and not all(in_env):
+            return True
+        # Run sits fully above/below the track envelope but in panel footprint.
+        if in_env and not any(in_env):
+            return True
+    return False
+
+
+def _endpoint_crosses_track_envelope(
+    el, panel_outlines, track_spans, limit_pids
+):
+    """True when curve endpoints split inside/outside the track envelope."""
+    start, end = _curve_endpoints(el)
+    if start is None or end is None:
+        return False
+    tol = INTERIOR_TOL_FT
+    for pid in limit_pids:
+        span = track_spans.get(pid)
+        outline = panel_outlines.get(pid)
+        if not span or outline is None:
+            continue
+        z0, z1 = span
+        flags = []
+        for pt in (start, end):
+            if _point_in_outline_xy(pt, outline, tol):
+                flags.append(z0 - tol <= pt.Z <= z1 + tol)
+        if len(flags) >= 2 and flags[0] != flags[1]:
+            return True
+        if flags and not any(flags):
+            return True
     return False
 
 
@@ -752,10 +852,22 @@ def _curve_crosses_panel_boundary(el, panel_outlines, track_spans=None):
     if not _is_linear_mep_curve(el):
         return False
 
+    start_p, end_p = _endpoint_panels(el, panel_outlines)
+    touched = _panels_touched_by_curve(el, panel_outlines, start_p, end_p)
+
+    if track_spans and touched:
+        if _connectors_cross_track_boundary(
+            el, panel_outlines, track_spans, touched
+        ):
+            return True
+        if _endpoint_crosses_track_envelope(
+            el, panel_outlines, track_spans, touched
+        ):
+            return True
+
     if _connectors_cross_panel_boundary(el, panel_outlines):
         return True
 
-    start_p, end_p = _endpoint_panels(el, panel_outlines)
     start_in = bool(start_p)
     end_in = bool(end_p)
 
@@ -865,6 +977,14 @@ def _is_panel_crossing_connection(
     if not _is_mep_connection(el):
         return False
 
+    touched = _location_panels(el, panel_outlines)
+    if track_spans and _connectors_cross_track_boundary(
+        el, panel_outlines, track_spans, touched or None
+    ):
+        return True
+    if _connectors_cross_panel_boundary(el, panel_outlines):
+        return True
+
     has_crossing = False
     has_inside = False
     panel_names = set()
@@ -872,7 +992,7 @@ def _is_panel_crossing_connection(
     for nb in _mep_network_neighbors(el, valid_ids):
         if not _is_linear_mep_curve(nb):
             continue
-        if _curve_crosses_panel_boundary(nb, panel_outlines):
+        if _curve_crosses_panel_boundary(nb, panel_outlines, track_spans):
             has_crossing = True
             continue
         sp, ep = _endpoint_panels(nb, panel_outlines)
@@ -885,8 +1005,10 @@ def _is_panel_crossing_connection(
     if has_inside and not has_crossing:
         return False
 
-    # Elbow/tee at panel exit: inside run + crossing run → panel fitting, not red.
+    # Exit conduit fitting joining inside + exit runs → red.
     if has_inside and has_crossing:
+        if _is_conduit_element(el):
+            return True
         return False
 
     if has_crossing:
