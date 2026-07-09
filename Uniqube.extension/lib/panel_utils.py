@@ -625,7 +625,7 @@ def _fitting_on_crossing_run(el, panel_outlines, valid_ids, track_spans=None):
         return True
     for nb in _mep_network_neighbors(el, valid_ids):
         if _is_linear_mep_curve(nb) and _curve_crosses_panel_boundary(
-            nb, panel_outlines, track_spans
+            nb, panel_outlines, track_spans, valid_ids
         ):
             return True
     return False
@@ -761,6 +761,63 @@ def _endpoint_crosses_track_envelope(
     return False
 
 
+def _linear_mep_fully_inside_panel_track(el, panel_outlines, track_spans):
+    """True when both endpoints lie inside one panel's track envelope."""
+    start_p, end_p = _endpoint_panels(el, panel_outlines)
+    common = start_p & end_p
+    if len(common) != 1:
+        return False
+    pid = list(common)[0]
+    start, end = _curve_endpoints(el)
+    if start is None or end is None:
+        return False
+    span = track_spans.get(pid) if track_spans else None
+    outline = panel_outlines.get(pid)
+    if span and outline:
+        z0, z1 = span
+        return (
+            _point_in_track_envelope(start, outline, z0, z1)
+            and _point_in_track_envelope(end, outline, z0, z1)
+        )
+    return _curve_fully_inside_panel(el, panel_outlines, pid)
+
+
+def _is_exit_panel_fitting(fitting, panel_outlines, track_spans, valid_ids):
+    """True for elbows/bends where one branch stays inside and another exits."""
+    if not _is_mep_connection(fitting) or _is_inline_fitting(fitting):
+        return False
+    if track_spans and _connectors_cross_track_boundary(
+        fitting, panel_outlines, track_spans
+    ):
+        return True
+    if _connectors_cross_panel_boundary(fitting, panel_outlines):
+        return True
+    if not valid_ids:
+        return False
+    has_inside = False
+    has_outside = False
+    for nb in _mep_network_neighbors(fitting, valid_ids):
+        if not _is_linear_mep_curve(nb):
+            continue
+        if _linear_mep_fully_inside_panel_track(nb, panel_outlines, track_spans):
+            has_inside = True
+        else:
+            has_outside = True
+    return has_inside and has_outside
+
+
+def _linear_mep_after_exit_fitting(el, panel_outlines, track_spans, valid_ids):
+    """True for the exit-side run connected to an exit elbow/bend."""
+    if not valid_ids or not _is_linear_mep_curve(el):
+        return False
+    if _linear_mep_fully_inside_panel_track(el, panel_outlines, track_spans):
+        return False
+    for nb in _mep_network_neighbors(el, valid_ids):
+        if _is_exit_panel_fitting(nb, panel_outlines, track_spans, valid_ids):
+            return True
+    return False
+
+
 def _connectors_cross_panel_boundary(el, panel_outlines):
     """True when MEP connectors span inside and outside the panel volume."""
     cm = _get_mep_connector_manager(el)
@@ -847,13 +904,20 @@ def _panels_touched_by_curve(el, panel_outlines, start_p, end_p):
     return touched
 
 
-def _curve_crosses_panel_boundary(el, panel_outlines, track_spans=None):
+def _curve_crosses_panel_boundary(
+    el, panel_outlines, track_spans=None, valid_ids=None
+):
     """True when a pipe/conduit enters or exits a panel (inside ↔ outside)."""
     if not _is_linear_mep_curve(el):
         return False
 
     start_p, end_p = _endpoint_panels(el, panel_outlines)
     touched = _panels_touched_by_curve(el, panel_outlines, start_p, end_p)
+
+    if valid_ids and _linear_mep_after_exit_fitting(
+        el, panel_outlines, track_spans, valid_ids
+    ):
+        return True
 
     if track_spans and touched:
         if _connectors_cross_track_boundary(
@@ -972,7 +1036,9 @@ def _is_panel_crossing_connection(
 ):
     """True for pipes/conduits exiting a panel; fittings only when on exit-only runs."""
     if _is_linear_mep_curve(el):
-        return _curve_crosses_panel_boundary(el, panel_outlines, track_spans)
+        return _curve_crosses_panel_boundary(
+            el, panel_outlines, track_spans, valid_ids
+        )
 
     if not _is_mep_connection(el):
         return False
@@ -992,7 +1058,9 @@ def _is_panel_crossing_connection(
     for nb in _mep_network_neighbors(el, valid_ids):
         if not _is_linear_mep_curve(nb):
             continue
-        if _curve_crosses_panel_boundary(nb, panel_outlines, track_spans):
+        if _curve_crosses_panel_boundary(
+            nb, panel_outlines, track_spans, valid_ids
+        ):
             has_crossing = True
             continue
         sp, ep = _endpoint_panels(nb, panel_outlines)
@@ -2909,6 +2977,39 @@ def combine_panels_group_color(
         stats["crossing_count"] += 1
         if tag_mep:
             _clear_container(el)
+
+    for eid in mep_assignments.keys():
+        el = doc.GetElement(eid)
+        if el is None:
+            continue
+        if _is_panel_crossing_connection(
+            el, mep_assignments, interior_outlines, valid_ids, track_spans
+        ):
+            _mark_crossing_mep(el, eid)
+        elif _fitting_on_crossing_run(
+            el, interior_outlines, valid_ids, track_spans
+        ):
+            _mark_crossing_mep(el, eid)
+
+    for _ in range(8):
+        added = False
+        for eid in mep_assignments.keys():
+            if eid in processed_crossings:
+                continue
+            el = doc.GetElement(eid)
+            if el is None or not _is_linear_mep_curve(el):
+                continue
+            if _linear_mep_fully_inside_panel_track(
+                el, interior_outlines, track_spans
+            ):
+                continue
+            for nb in _mep_network_neighbors(el, valid_ids):
+                if nb.Id in processed_crossings:
+                    _mark_crossing_mep(el, eid)
+                    added = True
+                    break
+        if not added:
+            break
 
     for pid in selected:
         settings = panel_settings()
