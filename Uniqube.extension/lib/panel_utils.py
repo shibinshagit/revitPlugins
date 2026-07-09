@@ -296,6 +296,33 @@ FITTING_CATS = set([
     DB.BuiltInCategory.OST_DuctAccessory,
 ])
 
+LINEAR_MEP_CATS = frozenset([
+    DB.BuiltInCategory.OST_Conduit,
+    DB.BuiltInCategory.OST_PipeCurves,
+    DB.BuiltInCategory.OST_FlexPipeCurves,
+    DB.BuiltInCategory.OST_FlexDuctCurves,
+    DB.BuiltInCategory.OST_DuctCurves,
+    DB.BuiltInCategory.OST_CableTray,
+])
+
+
+def _is_linear_mep_curve(el):
+    """True for pipe/conduit/cable-tray runs (linear MEP curves)."""
+    if el is None:
+        return False
+    try:
+        if isinstance(el, DB.MEPCurve):
+            return True
+    except Exception:
+        pass
+    cat = el.Category
+    if cat is None:
+        return False
+    try:
+        return cat.BuiltInCategory in LINEAR_MEP_CATS
+    except Exception:
+        return False
+
 # Host + link spatial assignment for panel grouping workflows.
 LINK_ASSIGN_CATS = MEP_CATS + [DB.BuiltInCategory.OST_StructuralFraming]
 
@@ -417,7 +444,7 @@ def _location_panels(elem, panel_outlines):
 
 def _curve_touches_panel_zone(el, panel_outlines):
     """True when at least one curve endpoint lies inside a panel zone."""
-    if not isinstance(el, DB.MEPCurve):
+    if not _is_linear_mep_curve(el):
         return bool(_location_panels(el, panel_outlines))
     start_p, end_p = _endpoint_panels(el, panel_outlines)
     return bool(start_p or end_p)
@@ -429,7 +456,7 @@ def _panels_matching(pid, panel_set):
 
 def _curve_fully_inside_panel(el, panel_outlines, pid):
     """True when both curve endpoints lie inside the given panel volume."""
-    if not isinstance(el, DB.MEPCurve):
+    if not _is_linear_mep_curve(el):
         return _panels_matching(pid, _location_panels(el, panel_outlines))
     start_p, end_p = _endpoint_panels(el, panel_outlines)
     return _panels_matching(pid, start_p) and _panels_matching(pid, end_p)
@@ -443,7 +470,7 @@ def _mep_belongs_in_panel(
     if existing and panel_ids_match(existing, pid):
         return True
 
-    if isinstance(el, DB.MEPCurve):
+    if _is_linear_mep_curve(el):
         return _curve_fully_inside_panel(el, panel_outlines, pid)
 
     if _is_mep_connection(el):
@@ -461,7 +488,7 @@ def _mep_belongs_in_panel(
 def _fitting_serves_panel_run(el, pid, host_assignments, panel_outlines, valid_ids):
     """True when a fitting joins non-crossing runs assigned to this panel."""
     for nb in _mep_network_neighbors(el, valid_ids):
-        if not isinstance(nb, DB.MEPCurve):
+        if not _is_linear_mep_curve(nb):
             continue
         if _curve_crosses_panel_boundary(nb, panel_outlines):
             continue
@@ -539,7 +566,7 @@ def _fitting_on_crossing_run(el, panel_outlines, valid_ids):
     if _is_inline_fitting(el):
         return False
     for nb in _mep_network_neighbors(el, valid_ids):
-        if isinstance(nb, DB.MEPCurve) and _curve_crosses_panel_boundary(
+        if _is_linear_mep_curve(nb) and _curve_crosses_panel_boundary(
             nb, panel_outlines
         ):
             return True
@@ -550,7 +577,7 @@ def _mep_belongs_in_assembly(
     el, pid, panel_outlines, host_assignments, valid_ids
 ):
     """MEP members for Revit assembly — fully inside panel, no exit fittings."""
-    if isinstance(el, DB.MEPCurve):
+    if _is_linear_mep_curve(el):
         return _curve_fully_inside_panel(el, panel_outlines, pid)
     if _is_mep_connection(el):
         if _fitting_on_crossing_run(el, panel_outlines, valid_ids):
@@ -575,17 +602,67 @@ def _mep_touches_panel_zone(
         return True
     if _is_mep_connection(el) and host_assignments is not None and valid_ids:
         for nb in _mep_network_neighbors(el, valid_ids):
-            if isinstance(nb, DB.MEPCurve) and _curve_touches_panel_zone(
+            if _is_linear_mep_curve(nb) and _curve_touches_panel_zone(
                 nb, panel_outlines
             ):
                 return True
     return False
 
 
+def _connectors_cross_panel_boundary(el, panel_outlines):
+    """True when MEP connectors span inside and outside the panel volume."""
+    cm = _get_mep_connector_manager(el)
+    if cm is None:
+        return False
+    try:
+        connectors = list(cm.Connectors)
+    except Exception:
+        return False
+    if not connectors:
+        return False
+    inside_flags = []
+    for conn in connectors:
+        try:
+            pt = conn.Origin
+        except Exception:
+            continue
+        inside_flags.append(
+            any(_point_in_outline(pt, outline) for outline in panel_outlines.values())
+        )
+    if not inside_flags:
+        return False
+    return any(inside_flags) and not all(inside_flags)
+
+
+def _curve_samples_outside_panel(el, panel_outlines, pid):
+    """True when any sampled point on the curve lies outside the panel box."""
+    outline = panel_outlines.get(pid)
+    if outline is None:
+        return False
+    loc = el.Location
+    if not isinstance(loc, DB.LocationCurve):
+        return False
+    curve = loc.Curve
+    if curve is None:
+        return False
+    for i in range(1, 10):
+        try:
+            pt = curve.Evaluate(i / 10.0, True)
+        except Exception:
+            continue
+        if not _point_in_outline(pt, outline):
+            return True
+    return False
+
+
 def _curve_crosses_panel_boundary(el, panel_outlines):
     """True when a pipe/conduit enters or exits a panel (inside ↔ outside)."""
-    if not isinstance(el, DB.MEPCurve):
+    if not _is_linear_mep_curve(el):
         return False
+
+    if _connectors_cross_panel_boundary(el, panel_outlines):
+        return True
+
     start_p, end_p = _endpoint_panels(el, panel_outlines)
     start_in = bool(start_p)
     end_in = bool(end_p)
@@ -601,22 +678,13 @@ def _curve_crosses_panel_boundary(el, panel_outlines):
         if start_names != end_names:
             return True
 
-    # Both endpoints inside — check mid-span still inside (top/bottom exit).
-    if start_in and end_in and start_p == end_p:
-        loc = el.Location
-        if isinstance(loc, DB.LocationCurve):
-            curve = loc.Curve
-            if curve is not None:
-                pid = list(start_p)[0]
-                outline = panel_outlines.get(pid)
-                if outline is not None:
-                    for t in (0.25, 0.5, 0.75):
-                        try:
-                            pt = curve.Evaluate(t, True)
-                        except Exception:
-                            continue
-                        if not _point_in_outline(pt, outline):
-                            return True
+    # Both endpoints inside — check mid-span still inside (top/side exit).
+    if start_in and end_in:
+        common = start_p & end_p
+        panels = common if common else (start_p if start_p == end_p else set())
+        for pid in panels:
+            if _curve_samples_outside_panel(el, panel_outlines, pid):
+                return True
     return False
 
 
@@ -625,7 +693,7 @@ def _refine_curve_assignments(doc, host_assignments, panel_outlines):
     refined = 0
     for eid in list(host_assignments.keys()):
         el = doc.GetElement(eid)
-        if el is None or not isinstance(el, DB.MEPCurve):
+        if el is None or not _is_linear_mep_curve(el):
             continue
         start_p, end_p = _endpoint_panels(el, panel_outlines)
 
@@ -677,11 +745,11 @@ def _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids):
         nb_pids = host_assignments.get(nb.Id, set())
         if len(nb_pids) == 1:
             panels.add(list(nb_pids)[0])
-        elif isinstance(nb, DB.MEPCurve):
+        elif _is_linear_mep_curve(nb):
             start_p, end_p = _endpoint_panels(nb, panel_outlines)
             panels.update(start_p)
             panels.update(end_p)
-    if isinstance(el, DB.MEPCurve):
+    if _is_linear_mep_curve(el):
         start_p, end_p = _endpoint_panels(el, panel_outlines)
         panels.update(start_p)
         panels.update(end_p)
@@ -689,8 +757,8 @@ def _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids):
 
 
 def _is_panel_crossing_connection(el, host_assignments, panel_outlines, valid_ids):
-    """True for pipes exiting a panel; fittings only when on exit-only runs."""
-    if isinstance(el, DB.MEPCurve):
+    """True for pipes/conduits exiting a panel; fittings only when on exit-only runs."""
+    if _is_linear_mep_curve(el):
         return _curve_crosses_panel_boundary(el, panel_outlines)
 
     if not _is_mep_connection(el):
@@ -701,7 +769,7 @@ def _is_panel_crossing_connection(el, host_assignments, panel_outlines, valid_id
     panel_names = set()
 
     for nb in _mep_network_neighbors(el, valid_ids):
-        if not isinstance(nb, DB.MEPCurve):
+        if not _is_linear_mep_curve(nb):
             continue
         if _curve_crosses_panel_boundary(nb, panel_outlines):
             has_crossing = True
@@ -739,7 +807,7 @@ def _assign_fittings_from_runs(doc, host_assignments, panel_outlines):
         if el is None or not _is_mep_connection(el):
             continue
         for nb in _mep_network_neighbors(el, valid_ids):
-            if not isinstance(nb, DB.MEPCurve):
+            if not _is_linear_mep_curve(nb):
                 continue
             if _curve_crosses_panel_boundary(nb, panel_outlines):
                 continue
@@ -777,7 +845,7 @@ def _resolve_panel_for_element(el, host_assignments, panel_outlines, spatial_pid
     if len(conn_panels) == 1:
         return list(conn_panels)[0]
 
-    if isinstance(el, DB.MEPCurve):
+    if _is_linear_mep_curve(el):
         start_p, end_p = _endpoint_panels(el, panel_outlines)
         if len(start_p) == 1 and start_p == end_p:
             return list(start_p)[0]
@@ -1182,11 +1250,11 @@ def _read_container_value(elem):
 
 def _get_mep_connector_manager(elem):
     """Return ConnectorManager for MEPCurve, fittings, or equipment."""
-    try:
-        if isinstance(elem, DB.MEPCurve):
+    if _is_linear_mep_curve(elem):
+        try:
             return elem.ConnectorManager
-    except Exception:
-        pass
+        except Exception:
+            pass
     try:
         mep_model = elem.MEPModel
         if mep_model is not None:
@@ -1299,7 +1367,7 @@ def propagate_panel_assignments(doc, host_assignments, panel_outlines=None, max_
                 el, panel_outlines, host_assignments, valid_ids
             ):
                 continue
-            if isinstance(el, DB.MEPCurve) and _curve_crosses_panel_boundary(
+            if _is_linear_mep_curve(el) and _curve_crosses_panel_boundary(
                 el, panel_outlines
             ):
                 continue
@@ -1338,7 +1406,7 @@ def _append_bimsf_param_assignments(doc, panel_outlines, host_assignments):
             p = item.LookupParameter(PARAM_NAME)
             if p is None:
                 continue
-            if isinstance(item, DB.MEPCurve):
+            if _is_linear_mep_curve(item):
                 if not _curve_touches_panel_zone(item, panel_outlines):
                     continue
             elif not _location_panels(item, panel_outlines):
@@ -2521,7 +2589,7 @@ def combine_panels_group_color(
 
     Host framing and MEP go into Revit assemblies. Linked panel framing is
     colored in the active view and should be assembled in the link file via
-    group_link_panel_framing(). Panel-crossing pipes/fittings (enter/exit panel) red.
+    group_link_panel_framing(). Panel-crossing pipes/conduits/fittings (enter/exit panel) red.
     """
     if link_framing is None:
         link_framing = map_link_framing_by_container(doc)
