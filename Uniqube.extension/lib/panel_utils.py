@@ -777,35 +777,70 @@ def _mep_entirely_outside_panels(el, panel_outlines):
     return True
 
 
-def _conduit_crosses_track_boundary(el, panel_outlines, track_spans):
-    """True when a conduit run crosses the panel top/bottom track envelope."""
-    if not _is_conduit_element(el) or not track_spans:
+def _resolved_track_spans(panel_elements, link_zones, track_spans):
+    """Ensure every panel has track Z bounds when horizontal framing exists."""
+    resolved = {}
+    for pid in get_all_panel_ids(panel_elements, link_zones):
+        span = track_spans.get(pid) if track_spans else None
+        if not span:
+            host = merge_framing_for_panel(panel_elements, pid)
+            lz = link_zones.get(pid, []) if link_zones else []
+            span = _collect_track_z_extent(host, lz)
+        resolved[pid] = span
+    return resolved
+
+
+def _linear_mep_crosses_track_boundary(el, panel_outlines, track_spans):
+    """True when a run pierces the top/bottom track envelope of a panel."""
+    if not track_spans or not _is_linear_mep_curve(el):
         return False
     start, end = _curve_endpoints(el)
     if start is None or end is None:
         return False
-    tol = INTERIOR_TOL_FT
     start_p, end_p = _endpoint_panels(el, panel_outlines)
-    touched = _panels_touched_by_curve(el, panel_outlines, start_p, end_p)
+    touched = start_p | end_p
+    if not touched:
+        touched = _location_panels(el, panel_outlines)
     if not touched:
         return False
+
+    tol = INTERIOR_TOL_FT
     for pid in touched:
         span = track_spans.get(pid)
         outline = panel_outlines.get(pid)
         if not span or outline is None:
             continue
         z0, z1 = span
-        env = []
+
+        in_track = []
         for pt in (start, end):
             if _point_in_outline_xy(pt, outline, tol):
-                env.append(_point_in_track_envelope(pt, outline, z0, z1))
-        if len(env) >= 2 and env[0] != env[1]:
+                in_track.append(_point_in_track_envelope(pt, outline, z0, z1))
+        if len(in_track) >= 2 and in_track[0] != in_track[1]:
             return True
+
         if _curve_exceeds_track_envelope(
             el, panel_outlines, track_spans, [pid]
         ):
             return True
+
+        below_track = False
+        above_track = False
+        for pt in _curve_sample_points(el):
+            if not _point_in_outline_xy(pt, outline, tol):
+                continue
+            if pt.Z <= z1 + tol:
+                below_track = True
+            if pt.Z > z1 + tol:
+                above_track = True
+            if below_track and above_track:
+                return True
     return False
+
+
+def _conduit_crosses_track_boundary(el, panel_outlines, track_spans):
+    """True when a conduit run crosses the panel top/bottom track envelope."""
+    return _linear_mep_crosses_track_boundary(el, panel_outlines, track_spans)
 
 
 def _is_panel_crossing_for_color(el, panel_outlines, track_spans):
@@ -814,9 +849,10 @@ def _is_panel_crossing_for_color(el, panel_outlines, track_spans):
         return False
     if _mep_entirely_outside_panels(el, panel_outlines):
         return False
-    if _is_conduit_element(el) and track_spans:
-        if _conduit_crosses_track_boundary(el, panel_outlines, track_spans):
-            return True
+    if track_spans and _linear_mep_crosses_track_boundary(
+        el, panel_outlines, track_spans
+    ):
+        return True
     return _curve_crosses_panel_boundary(el, panel_outlines, track_spans)
 
 
@@ -914,7 +950,7 @@ def _curve_crosses_panel_boundary(el, panel_outlines, track_spans=None):
     start_p, end_p = _endpoint_panels(el, panel_outlines)
     touched = _panels_touched_by_curve(el, panel_outlines, start_p, end_p)
 
-    if track_spans and touched and not _is_conduit_element(el):
+    if track_spans and touched:
         if _connectors_cross_track_boundary(
             el, panel_outlines, track_spans, touched
         ):
@@ -2121,6 +2157,11 @@ def _view_color_kit(doc):
     red = DB.Color(255, 0, 0)
     red_settings.SetProjectionLineColor(red)
     red_settings.SetCutLineColor(red)
+    if fill_pattern:
+        red_settings.SetSurfaceBackgroundPatternId(fill_pattern.Id)
+        red_settings.SetSurfaceBackgroundPatternColor(red)
+        red_settings.SetCutBackgroundPatternId(fill_pattern.Id)
+        red_settings.SetCutBackgroundPatternColor(red)
 
     def panel_settings():
         r = random.randint(0, 180)
@@ -2942,6 +2983,9 @@ def combine_panels_group_color(
     _, interior_outlines, track_spans = _build_panel_outlines(
         panel_elements, link_zones
     )
+    resolved_track_spans = _resolved_track_spans(
+        panel_elements, link_zones, track_spans
+    )
     valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
     red_settings, panel_settings = _view_color_kit(doc)
 
@@ -3011,7 +3055,7 @@ def combine_panels_group_color(
                 continue
             eid_int = eid.IntegerValue
             if _is_panel_crossing_for_color(
-                el, interior_outlines, track_spans
+                el, interior_outlines, resolved_track_spans
             ):
                 _mark_crossing_mep(el, eid)
                 continue
