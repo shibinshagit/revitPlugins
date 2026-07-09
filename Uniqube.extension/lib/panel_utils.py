@@ -687,34 +687,64 @@ def _connectors_cross_panel_boundary(el, panel_outlines):
 
 
 def _curve_samples_outside_panel(el, panel_outlines, pid):
-    """True when any sampled point on the curve lies outside the panel box."""
+    """True when any mid-span point lies outside the panel interior box."""
     outline = panel_outlines.get(pid)
     if outline is None:
         return False
-    for pt in _curve_sample_points(el):
+    loc = el.Location
+    if not isinstance(loc, DB.LocationCurve):
+        return False
+    curve = loc.Curve
+    if curve is None:
+        return False
+    for i in range(1, 10):
+        try:
+            pt = curve.Evaluate(i / 10.0, True)
+        except Exception:
+            continue
         if not _point_in_outline(pt, outline):
             return True
     return False
 
 
-def _curve_exceeds_track_envelope(el, panel_outlines, track_spans):
-    """True when a run leaves the panel through top/bottom track envelope."""
+def _curve_exceeds_track_envelope(el, panel_outlines, track_spans, limit_pids=None):
+    """True when a run crosses the track envelope — not merely above/below it."""
     if not track_spans:
         return False
     tol = INTERIOR_TOL_FT
-    for pid, span in track_spans.items():
-        if not span:
-            continue
-        z0, z1 = span
+    if limit_pids:
+        pid_list = [
+            pid for pid in limit_pids
+            if pid in track_spans and track_spans[pid]
+        ]
+    else:
+        pid_list = [
+            pid for pid, span in track_spans.items() if span
+        ]
+    for pid in pid_list:
+        z0, z1 = track_spans[pid]
         outline = panel_outlines.get(pid)
         if outline is None:
             continue
+        inside_env = False
+        outside_env = False
         for pt in _curve_sample_points(el):
             if not _point_in_outline_xy(pt, outline, tol):
                 continue
-            if pt.Z > z1 + tol or pt.Z < z0 - tol:
+            if z0 - tol <= pt.Z <= z1 + tol:
+                inside_env = True
+            else:
+                outside_env = True
+            if inside_env and outside_env:
                 return True
     return False
+
+
+def _panels_touched_by_curve(el, panel_outlines, start_p, end_p):
+    touched = set(start_p) | set(end_p)
+    if not touched:
+        touched = _location_panels(el, panel_outlines)
+    return touched
 
 
 def _curve_crosses_panel_boundary(el, panel_outlines, track_spans=None):
@@ -748,8 +778,12 @@ def _curve_crosses_panel_boundary(el, panel_outlines, track_spans=None):
             if _curve_samples_outside_panel(el, panel_outlines, pid):
                 return True
 
-    if _curve_exceeds_track_envelope(el, panel_outlines, track_spans):
-        return True
+    touched = _panels_touched_by_curve(el, panel_outlines, start_p, end_p)
+    if track_spans and touched:
+        if _curve_exceeds_track_envelope(
+            el, panel_outlines, track_spans, touched
+        ):
+            return True
     return False
 
 
@@ -2753,18 +2787,6 @@ def combine_panels_group_color(
         stats["crossing_count"] += 1
         if tag_mep:
             _clear_container(el)
-
-    for eid in mep_assignments.keys():
-        el = doc.GetElement(eid)
-        if el is None:
-            continue
-        if _is_panel_crossing_connection(
-            el, mep_assignments, interior_outlines, valid_ids, track_spans
-        ):
-            _mark_crossing_mep(el, eid)
-            continue
-        if _fitting_on_crossing_run(el, interior_outlines, valid_ids, track_spans):
-            _mark_crossing_mep(el, eid)
 
     for pid in selected:
         settings = panel_settings()
