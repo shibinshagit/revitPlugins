@@ -843,12 +843,20 @@ def _linear_mep_in_exit_column(el, panel_outlines, track_spans):
     return False
 
 
-def _linear_mep_connected_to_inside_panel(el, panel_outlines, valid_ids):
+def _linear_mep_connected_to_inside_panel(
+    el, panel_outlines, valid_ids, host_assignments=None
+):
     """True when a run joins MEP that still lies inside a panel zone."""
     for nb in _mep_network_neighbors(el, valid_ids):
         if _is_linear_mep_curve(nb):
             if not _mep_entirely_outside_panels(nb, panel_outlines):
                 return True
+            if host_assignments:
+                nb_pids = host_assignments.get(nb.Id, set())
+                if len(nb_pids) == 1 and _curve_touches_panel_zone(
+                    nb, panel_outlines
+                ):
+                    return True
         elif _is_mep_connection(nb):
             if not _mep_entirely_outside_panels(nb, panel_outlines):
                 return True
@@ -856,10 +864,18 @@ def _linear_mep_connected_to_inside_panel(el, panel_outlines, valid_ids):
                 if _is_linear_mep_curve(nb2):
                     if not _mep_entirely_outside_panels(nb2, panel_outlines):
                         return True
+                    if host_assignments:
+                        nb2_pids = host_assignments.get(nb2.Id, set())
+                        if len(nb2_pids) == 1 and _curve_touches_panel_zone(
+                            nb2, panel_outlines
+                        ):
+                            return True
     return False
 
 
-def _linear_mep_exit_stub_from_panel(el, panel_outlines, track_spans, valid_ids):
+def _linear_mep_exit_stub_from_panel(
+    el, panel_outlines, track_spans, valid_ids, host_assignments=None
+):
     """Exit run outside the panel box but connected to inside-panel MEP."""
     if not valid_ids or not _is_linear_mep_curve(el):
         return False
@@ -867,17 +883,19 @@ def _linear_mep_exit_stub_from_panel(el, panel_outlines, track_spans, valid_ids)
         return False
     if not _linear_mep_in_exit_column(el, panel_outlines, track_spans):
         return False
-    return _linear_mep_connected_to_inside_panel(el, panel_outlines, valid_ids)
+    return _linear_mep_connected_to_inside_panel(
+        el, panel_outlines, valid_ids, host_assignments
+    )
 
 
 def _linear_mep_connected_to_crossing(el, valid_ids, processed_crossings):
     """True when a run is joined to an already-marked crossing element."""
     for nb in _mep_network_neighbors(el, valid_ids):
-        if nb.Id in processed_crossings:
+        if nb.Id.IntegerValue in processed_crossings:
             return True
         if _is_mep_connection(nb):
             for nb2 in _mep_network_neighbors(nb, valid_ids):
-                if nb2.Id in processed_crossings:
+                if nb2.Id.IntegerValue in processed_crossings:
                     return True
     return False
 
@@ -936,22 +954,71 @@ def _conduit_crosses_track_boundary(el, panel_outlines, track_spans):
     return _linear_mep_crosses_track_boundary(el, panel_outlines, track_spans)
 
 
-def _is_panel_crossing_for_color(el, panel_outlines, track_spans, valid_ids=None):
+def _linear_mep_exits_panel_track(
+    el, panel_outlines, track_spans, valid_ids=None, host_assignments=None
+):
+    """True when a linear run extends outside the panel track zone."""
+    if not track_spans or not _is_linear_mep_curve(el):
+        return False
+    if _linear_mep_fully_inside_panel_track(el, panel_outlines, track_spans):
+        return False
+    if not _linear_mep_in_exit_column(el, panel_outlines, track_spans):
+        return False
+    if not _mep_entirely_outside_panels(el, panel_outlines):
+        return True
+    if valid_ids and _linear_mep_connected_to_inside_panel(
+        el, panel_outlines, valid_ids, host_assignments
+    ):
+        return True
+    return False
+
+
+def _is_panel_crossing_for_color(
+    el, panel_outlines, track_spans, valid_ids=None, host_assignments=None
+):
     """Red view override: linear runs that exit the panel, not outside-only pieces."""
     if not _is_linear_mep_curve(el):
         return False
+    if _connectors_cross_panel_boundary(el, panel_outlines):
+        return True
+    if track_spans and _connectors_cross_track_boundary(
+        el, panel_outlines, track_spans
+    ):
+        return True
     if track_spans and _linear_mep_crosses_track_boundary(
         el, panel_outlines, track_spans
+    ):
+        return True
+    if track_spans and _linear_mep_exits_panel_track(
+        el, panel_outlines, track_spans, valid_ids, host_assignments
     ):
         return True
     if not _mep_entirely_outside_panels(el, panel_outlines):
         if _curve_crosses_panel_boundary(el, panel_outlines, track_spans):
             return True
     if valid_ids and _linear_mep_exit_stub_from_panel(
-        el, panel_outlines, track_spans, valid_ids
+        el, panel_outlines, track_spans, valid_ids, host_assignments
     ):
         return True
     return False
+
+
+def _mep_belongs_in_panel_for_color(
+    el, pid, panel_outlines, host_assignments, valid_ids, track_spans
+):
+    """Panel color eligibility — geometry wins over stale container tags."""
+    if _is_linear_mep_curve(el):
+        if track_spans and _linear_mep_in_exit_column(
+            el, panel_outlines, track_spans
+        ):
+            if not _linear_mep_fully_inside_panel_track(
+                el, panel_outlines, track_spans
+            ):
+                return False
+        return _curve_fully_inside_panel(el, panel_outlines, pid)
+    return _mep_belongs_in_panel(
+        el, pid, panel_outlines, host_assignments, valid_ids
+    )
 
 
 def _connectors_cross_panel_boundary(el, panel_outlines):
@@ -984,17 +1051,10 @@ def _curve_samples_outside_panel(el, panel_outlines, pid):
     outline = panel_outlines.get(pid)
     if outline is None:
         return False
-    loc = el.Location
-    if not isinstance(loc, DB.LocationCurve):
+    samples = _curve_sample_points(el)
+    if len(samples) < 2:
         return False
-    curve = loc.Curve
-    if curve is None:
-        return False
-    for i in range(1, 10):
-        try:
-            pt = curve.Evaluate(i / 10.0, True)
-        except Exception:
-            continue
+    for pt in samples[1:-1]:
         if not _point_in_outline(pt, outline):
             return True
     return False
@@ -1099,7 +1159,7 @@ def _curve_crosses_panel_boundary(el, panel_outlines, track_spans=None):
     return False
 
 
-def _refine_curve_assignments(doc, host_assignments, panel_outlines):
+def _refine_curve_assignments(doc, host_assignments, panel_outlines, track_spans=None):
     """Assign conduits/pipes from endpoints; drop bbox-only hits outside panels."""
     refined = 0
     for eid in list(host_assignments.keys()):
@@ -1114,7 +1174,7 @@ def _refine_curve_assignments(doc, host_assignments, panel_outlines):
                 refined += 1
             continue
 
-        if _curve_crosses_panel_boundary(el, panel_outlines):
+        if _curve_crosses_panel_boundary(el, panel_outlines, track_spans):
             combined = start_p | end_p
             if host_assignments[eid] != combined:
                 host_assignments[eid] = combined
@@ -2127,7 +2187,7 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
         eid: set(pids) for eid, pids in host_assignments.items()
     }
     stats["curve_refined"] = _refine_curve_assignments(
-        doc, host_assignments, interior_outlines
+        doc, host_assignments, interior_outlines, track_spans
     )
     _seed_assignments_from_parameters(doc, host_assignments, known_pids)
     stats["propagated"] = propagate_panel_assignments(
@@ -3109,10 +3169,11 @@ def combine_panels_group_color(
     _clear_panel_containers_in_doc(doc, selected)
 
     def _mark_crossing_mep(el, eid):
-        if eid in processed_crossings:
+        eid_int = eid.IntegerValue
+        if eid_int in processed_crossings:
             return
         view.SetElementOverrides(eid, red_settings)
-        processed_crossings.add(eid)
+        processed_crossings.add(eid_int)
         stats["crossing_count"] += 1
         if tag_mep:
             _clear_container(el)
@@ -3122,14 +3183,19 @@ def combine_panels_group_color(
         if el is None:
             continue
         if _is_panel_crossing_for_color(
-            el, interior_outlines, resolved_track_spans, valid_ids
+            el,
+            interior_outlines,
+            resolved_track_spans,
+            valid_ids,
+            mep_assignments,
         ):
             _mark_crossing_mep(el, eid)
 
-    for _ in range(4):
+    for _ in range(8):
         added = False
         for eid in mep_assignments.keys():
-            if eid in processed_crossings:
+            eid_int = eid.IntegerValue
+            if eid_int in processed_crossings:
                 continue
             el = doc.GetElement(eid)
             if el is None or not _is_linear_mep_curve(el):
@@ -3193,15 +3259,24 @@ def combine_panels_group_color(
                 continue
             eid_int = eid.IntegerValue
             if _is_panel_crossing_for_color(
-                el, interior_outlines, resolved_track_spans, valid_ids
+                el,
+                interior_outlines,
+                resolved_track_spans,
+                valid_ids,
+                mep_assignments,
             ):
                 _mark_crossing_mep(el, eid)
                 continue
-            if eid in processed_crossings:
+            if eid_int in processed_crossings:
                 continue
             if _assignment_matches_panel(pids, pid):
-                if not _mep_belongs_in_panel(
-                    el, pid, interior_outlines, mep_assignments, valid_ids
+                if not _mep_belongs_in_panel_for_color(
+                    el,
+                    pid,
+                    interior_outlines,
+                    mep_assignments,
+                    valid_ids,
+                    resolved_track_spans,
                 ):
                     continue
                 if not _mep_belongs_in_assembly(
