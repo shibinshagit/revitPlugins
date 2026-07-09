@@ -341,13 +341,15 @@ def canonical_panel_id(pid, known_pids):
 
 
 def _build_panel_outlines(panel_elements, link_zones):
-    """Return (query_outlines, interior_outlines).
+    """Return (query_outlines, interior_outlines, track_spans).
 
     query_outlines — padded bbox for spatial collectors.
     interior_outlines — tight framing bounds for inside/crossing tests.
+    track_spans — {panel_id: (z_min, z_max)} from horizontal tracks only.
     """
     query_outlines = {}
     interior_outlines = {}
+    track_spans = {}
     all_pids = get_all_panel_ids(panel_elements, link_zones)
     for pid in all_pids:
         host_elems = merge_framing_for_panel(panel_elements, pid)
@@ -365,7 +367,8 @@ def _build_panel_outlines(panel_elements, link_zones):
         min_pt, max_pt = compute_panel_bbox(host_elems, lz)
         query_outlines[pid] = _panel_outline(min_pt, max_pt)
         interior_outlines[pid] = _interior_outline(min_pt, max_pt)
-    return query_outlines, interior_outlines
+        track_spans[pid] = _collect_track_z_extent(host_elems, lz)
+    return query_outlines, interior_outlines, track_spans
 
 
 def _point_in_outline(pt, outline):
@@ -376,17 +379,9 @@ def _point_in_outline(pt, outline):
 
 
 def _endpoint_panels(elem, panel_outlines):
-    """Return (start_panels, end_panels) for an MEPCurve."""
-    loc = elem.Location
-    if not isinstance(loc, DB.LocationCurve):
-        return set(), set()
-    curve = loc.Curve
-    if curve is None:
-        return set(), set()
-    try:
-        start = curve.GetEndPoint(0)
-        end = curve.GetEndPoint(1)
-    except Exception:
+    """Return (start_panels, end_panels) for a pipe/conduit run."""
+    start, end = _curve_endpoints(elem)
+    if start is None or end is None:
         return set(), set()
     start_p = {
         pid for pid, outline in panel_outlines.items()
@@ -397,6 +392,63 @@ def _endpoint_panels(elem, panel_outlines):
         if _point_in_outline(end, outline)
     }
     return start_p, end_p
+
+
+def _curve_endpoints(elem):
+    """Return curve end points for linear MEP — LocationCurve first, then connectors."""
+    loc = elem.Location
+    if isinstance(loc, DB.LocationCurve):
+        curve = loc.Curve
+        if curve is not None:
+            try:
+                return curve.GetEndPoint(0), curve.GetEndPoint(1)
+            except Exception:
+                pass
+    cm = _get_mep_connector_manager(elem)
+    if cm is None:
+        return None, None
+    origins = []
+    try:
+        for conn in cm.Connectors:
+            origins.append(conn.Origin)
+    except Exception:
+        return None, None
+    if len(origins) >= 2:
+        return origins[0], origins[1]
+    if len(origins) == 1:
+        return origins[0], origins[0]
+    return None, None
+
+
+def _curve_sample_points(elem):
+    """Sample points along a pipe/conduit centerline."""
+    points = []
+    start, end = _curve_endpoints(elem)
+    if start is not None:
+        points.append(start)
+    if end is not None and end != start:
+        points.append(end)
+    loc = elem.Location
+    if isinstance(loc, DB.LocationCurve):
+        curve = loc.Curve
+        if curve is not None:
+            for i in range(0, 11):
+                try:
+                    points.append(curve.Evaluate(i / 10.0, True))
+                except Exception:
+                    continue
+    return points
+
+
+def _point_in_outline_xy(pt, outline, tol=None):
+    if tol is None:
+        tol = INTERIOR_TOL_FT
+    o_min = outline.MinimumPoint
+    o_max = outline.MaximumPoint
+    return (
+        o_min.X - tol <= pt.X <= o_max.X + tol
+        and o_min.Y - tol <= pt.Y <= o_max.Y + tol
+    )
 
 
 def _location_panels(elem, panel_outlines):
@@ -559,7 +611,7 @@ def _is_inline_fitting(el):
     return _fitting_connectors_collinear(el)
 
 
-def _fitting_on_crossing_run(el, panel_outlines, valid_ids):
+def _fitting_on_crossing_run(el, panel_outlines, valid_ids, track_spans=None):
     """True for exit elbows/tees on runs that leave the panel — not inline couplings."""
     if not _is_mep_connection(el):
         return False
@@ -567,7 +619,7 @@ def _fitting_on_crossing_run(el, panel_outlines, valid_ids):
         return False
     for nb in _mep_network_neighbors(el, valid_ids):
         if _is_linear_mep_curve(nb) and _curve_crosses_panel_boundary(
-            nb, panel_outlines
+            nb, panel_outlines, track_spans
         ):
             return True
     return False
@@ -639,23 +691,33 @@ def _curve_samples_outside_panel(el, panel_outlines, pid):
     outline = panel_outlines.get(pid)
     if outline is None:
         return False
-    loc = el.Location
-    if not isinstance(loc, DB.LocationCurve):
-        return False
-    curve = loc.Curve
-    if curve is None:
-        return False
-    for i in range(1, 10):
-        try:
-            pt = curve.Evaluate(i / 10.0, True)
-        except Exception:
-            continue
+    for pt in _curve_sample_points(el):
         if not _point_in_outline(pt, outline):
             return True
     return False
 
 
-def _curve_crosses_panel_boundary(el, panel_outlines):
+def _curve_exceeds_track_envelope(el, panel_outlines, track_spans):
+    """True when a run leaves the panel through top/bottom track envelope."""
+    if not track_spans:
+        return False
+    tol = INTERIOR_TOL_FT
+    for pid, span in track_spans.items():
+        if not span:
+            continue
+        z0, z1 = span
+        outline = panel_outlines.get(pid)
+        if outline is None:
+            continue
+        for pt in _curve_sample_points(el):
+            if not _point_in_outline_xy(pt, outline, tol):
+                continue
+            if pt.Z > z1 + tol or pt.Z < z0 - tol:
+                return True
+    return False
+
+
+def _curve_crosses_panel_boundary(el, panel_outlines, track_spans=None):
     """True when a pipe/conduit enters or exits a panel (inside ↔ outside)."""
     if not _is_linear_mep_curve(el):
         return False
@@ -685,6 +747,9 @@ def _curve_crosses_panel_boundary(el, panel_outlines):
         for pid in panels:
             if _curve_samples_outside_panel(el, panel_outlines, pid):
                 return True
+
+    if _curve_exceeds_track_envelope(el, panel_outlines, track_spans):
+        return True
     return False
 
 
@@ -756,10 +821,12 @@ def _neighbor_panel_ids(el, host_assignments, panel_outlines, valid_ids):
     return panels
 
 
-def _is_panel_crossing_connection(el, host_assignments, panel_outlines, valid_ids):
+def _is_panel_crossing_connection(
+    el, host_assignments, panel_outlines, valid_ids, track_spans=None
+):
     """True for pipes/conduits exiting a panel; fittings only when on exit-only runs."""
     if _is_linear_mep_curve(el):
-        return _curve_crosses_panel_boundary(el, panel_outlines)
+        return _curve_crosses_panel_boundary(el, panel_outlines, track_spans)
 
     if not _is_mep_connection(el):
         return False
@@ -980,6 +1047,61 @@ def get_all_panel_ids(panel_elements, link_zones=None):
     if link_zones:
         ids.update(link_zones.keys())
     return ids
+
+
+def _framing_is_horizontal_relaxed(elem):
+    """Looser track/sill detection when strict horizontal check finds nothing."""
+    try:
+        loc = elem.Location
+        if isinstance(loc, DB.LocationCurve):
+            curve = loc.Curve
+            if curve is None:
+                return False
+            p0 = curve.GetEndPoint(0)
+            p1 = curve.GetEndPoint(1)
+            dx = p1.X - p0.X
+            dy = p1.Y - p0.Y
+            dz = abs(p1.Z - p0.Z)
+            run = (dx * dx + dy * dy) ** 0.5
+            return run > 0.01 and dz / run < 0.65
+    except Exception:
+        pass
+    return False
+
+
+def _collect_track_z_extent(elements, link_bboxes=None):
+    """Return (z_min, z_max) from horizontal tracks/sills, or None."""
+    track_z_min = []
+    track_z_max = []
+
+    def add_horizontal(bb_min, bb_max, el=None, is_horiz=None):
+        horiz = is_horiz
+        if horiz is None and el is not None:
+            horiz = _framing_is_horizontal(el)
+            if not horiz:
+                horiz = _framing_is_horizontal_relaxed(el)
+        if horiz:
+            track_z_min.append(bb_min.Z)
+            track_z_max.append(bb_max.Z)
+
+    for el in elements:
+        bbox = el.get_BoundingBox(None)
+        if bbox is None:
+            continue
+        add_horizontal(bbox.Min, bbox.Max, el=el)
+
+    if link_bboxes:
+        for item in link_bboxes:
+            if len(item) >= 3:
+                bb_min, bb_max, is_horiz = item[0], item[1], item[2]
+            else:
+                bb_min, bb_max = item[0], item[1]
+                is_horiz = None
+            add_horizontal(bb_min, bb_max, is_horiz=is_horiz)
+
+    if not track_z_min:
+        return None
+    return (min(track_z_min), max(track_z_max))
 
 
 def _framing_is_horizontal(elem):
@@ -1464,7 +1586,7 @@ def preview_mep_counts(doc, panel_elements, link_zones):
     mep_assignments, _, _, spatial = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
-    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
+    _, interior_outlines, _ = _build_panel_outlines(panel_elements, link_zones)
     valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
     counts = {pid: 0 for pid in get_all_panel_ids(panel_elements, link_zones)}
     for eid, pids in mep_assignments.items():
@@ -1489,7 +1611,7 @@ def preview_crossing_mep(doc, panel_elements, link_zones):
     mep_assignments, _, _, _ = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
-    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
+    _, interior_outlines, _ = _build_panel_outlines(panel_elements, link_zones)
     return _count_crossing_connections(doc, mep_assignments, interior_outlines)
 
 
@@ -1581,7 +1703,7 @@ def assign_mep_to_panels(doc, panel_elements, link_zones=None, assign_links=True
         host_assignments[item.Id] = set()
 
     all_pids = get_all_panel_ids(panel_elements, link_zones)
-    query_outlines, interior_outlines = _build_panel_outlines(
+    query_outlines, interior_outlines, track_spans = _build_panel_outlines(
         panel_elements, link_zones
     )
 
@@ -1699,7 +1821,7 @@ def fill_mep_bimsf_containers(
         doc, panel_elements, link_zones
     )
     stats["propagated"] = assign_stats.get("propagated", 0)
-    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
+    _, interior_outlines, _ = _build_panel_outlines(panel_elements, link_zones)
     known_pids = list(get_all_panel_ids(panel_elements, link_zones))
     valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
 
@@ -1782,6 +1904,9 @@ def _view_color_kit(doc):
     if fill_pattern:
         red_settings.SetSurfaceForegroundPatternId(fill_pattern.Id)
         red_settings.SetSurfaceForegroundPatternColor(DB.Color(255, 0, 0))
+    red = DB.Color(255, 0, 0)
+    red_settings.SetProjectionLineColor(red)
+    red_settings.SetCutLineColor(red)
 
     def panel_settings():
         r = random.randint(0, 180)
@@ -1791,6 +1916,9 @@ def _view_color_kit(doc):
         if fill_pattern:
             settings.SetSurfaceForegroundPatternId(fill_pattern.Id)
             settings.SetSurfaceForegroundPatternColor(DB.Color(r, g, b))
+        line_color = DB.Color(r, g, b)
+        settings.SetProjectionLineColor(line_color)
+        settings.SetCutLineColor(line_color)
         return settings
 
     return red_settings, panel_settings
@@ -2365,7 +2493,7 @@ def _host_panel_member_ids(host_doc, pid):
 
     panel_elements = map_framing(host_doc)
     link_zones = map_framing_from_links(host_doc)
-    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
+    _, interior_outlines, _ = _build_panel_outlines(panel_elements, link_zones)
     mep_assignments, _, _, _ = assign_mep_to_panels(
         host_doc, panel_elements, link_zones
     )
@@ -2420,7 +2548,7 @@ def _append_host_panel_mep_refs(host_doc, refs, pid, seen):
 
     panel_elements = map_framing(host_doc)
     link_zones = map_framing_from_links(host_doc)
-    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
+    _, interior_outlines, _ = _build_panel_outlines(panel_elements, link_zones)
     mep_assignments, _, _, _ = assign_mep_to_panels(
         host_doc, panel_elements, link_zones
     )
@@ -2597,7 +2725,9 @@ def combine_panels_group_color(
     mep_assignments, link_assignments, link_stats, spatial_assignments = (
         assign_mep_to_panels(doc, panel_elements, link_zones)
     )
-    _, interior_outlines = _build_panel_outlines(panel_elements, link_zones)
+    _, interior_outlines, track_spans = _build_panel_outlines(
+        panel_elements, link_zones
+    )
     valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
     red_settings, panel_settings = _view_color_kit(doc)
 
@@ -2614,6 +2744,27 @@ def combine_panels_group_color(
 
     processed_crossings = set()
     _clear_panel_containers_in_doc(doc, selected)
+
+    def _mark_crossing_mep(el, eid):
+        if eid in processed_crossings:
+            return
+        view.SetElementOverrides(eid, red_settings)
+        processed_crossings.add(eid)
+        stats["crossing_count"] += 1
+        if tag_mep:
+            _clear_container(el)
+
+    for eid in mep_assignments.keys():
+        el = doc.GetElement(eid)
+        if el is None:
+            continue
+        if _is_panel_crossing_connection(
+            el, mep_assignments, interior_outlines, valid_ids, track_spans
+        ):
+            _mark_crossing_mep(el, eid)
+            continue
+        if _fitting_on_crossing_run(el, interior_outlines, valid_ids, track_spans):
+            _mark_crossing_mep(el, eid)
 
     for pid in selected:
         settings = panel_settings()
@@ -2658,24 +2809,16 @@ def combine_panels_group_color(
                 continue
             eid_int = eid.IntegerValue
             if _is_panel_crossing_connection(
-                el, mep_assignments, interior_outlines, valid_ids
+                el, mep_assignments, interior_outlines, valid_ids, track_spans
             ):
-                if eid not in processed_crossings:
-                    view.SetElementOverrides(eid, red_settings)
-                    processed_crossings.add(eid)
-                    stats["crossing_count"] += 1
-                if tag_mep:
-                    _clear_container(el)
+                _mark_crossing_mep(el, eid)
                 continue
             if _fitting_on_crossing_run(
-                el, interior_outlines, valid_ids
+                el, interior_outlines, valid_ids, track_spans
             ):
-                if eid not in processed_crossings:
-                    view.SetElementOverrides(eid, red_settings)
-                    processed_crossings.add(eid)
-                    stats["crossing_count"] += 1
-                if tag_mep:
-                    _clear_container(el)
+                _mark_crossing_mep(el, eid)
+                continue
+            if eid in processed_crossings:
                 continue
             if _assignment_matches_panel(pids, pid):
                 if not _mep_belongs_in_panel(
