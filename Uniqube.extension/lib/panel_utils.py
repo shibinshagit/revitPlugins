@@ -1820,26 +1820,6 @@ def _create_panel_assembly(doc, pid, framing_ids, mep_ids=None):
     except Exception as ex:
         return False, _short_revit_error(ex)
 
-    mep_added = 0
-    mep_skipped = 0
-    if mep_ids is not None and mep_ids.Count > 0:
-        mep_added, mep_skipped = _add_mep_members_to_assembly(
-            doc, new_asm, mep_ids
-        )
-
-    try:
-        new_asm.AssemblyTypeName = container_name
-        doc.Regenerate()
-    except Exception as ex:
-        _set_container(new_asm, container_name)
-        set_panel_labels(new_asm, container_name)
-        msg = "assembly created; rename failed: {}".format(
-            _short_revit_error(ex)
-        )
-        if mep_skipped:
-            msg += " (MEP in assembly: {})".format(mep_added)
-        return True, msg
-
     _set_container(new_asm, container_name)
     set_panel_labels(new_asm, container_name)
     mk = new_asm.LookupParameter("Mark")
@@ -1848,6 +1828,25 @@ def _create_panel_assembly(doc, pid, framing_ids, mep_ids=None):
             mk.Set(panel_display_name(container_name))
         except Exception:
             pass
+
+    mep_added = 0
+    mep_skipped = 0
+    if mep_ids is not None and mep_ids.Count > 0:
+        mep_added, mep_skipped = _add_mep_members_to_assembly(
+            doc, new_asm, mep_ids
+        )
+
+    try:
+        doc.Regenerate()
+        new_asm.AssemblyTypeName = container_name
+        doc.Regenerate()
+    except Exception as ex:
+        msg = "assembly created; rename failed: {}".format(
+            _short_revit_error(ex)
+        )
+        if mep_skipped:
+            msg += " (MEP in assembly: {})".format(mep_added)
+        return True, msg
 
     if mep_ids is not None and mep_ids.Count > 0:
         if mep_added == 0:
@@ -2542,9 +2541,146 @@ def _flatten_copied_elements(host_doc, element_ids):
     return result, exploded
 
 
+def _is_framing_element(elem):
+    cat = elem.Category if elem is not None else None
+    if cat is None:
+        return False
+    try:
+        return cat.BuiltInCategory == DB.BuiltInCategory.OST_StructuralFraming
+    except Exception:
+        try:
+            return cat.Id.IntegerValue == int(
+                DB.BuiltInCategory.OST_StructuralFraming
+            )
+        except Exception:
+            return False
+
+
+def _refresh_link_panel_framing(host_doc, pid):
+    """Re-read link framing for one panel (live UniqueIds, loaded links only)."""
+    link_framing = map_link_framing_by_container(host_doc)
+    pairs = merge_link_framing_for_panel(link_framing, pid)
+    fresh = []
+    for link_inst, elem in pairs:
+        link_doc = link_inst.GetLinkDocument()
+        if link_doc is None:
+            continue
+        try:
+            live = link_doc.GetElement(elem.UniqueId)
+            if live is not None and _is_framing_element(live):
+                fresh.append((link_inst, live))
+        except Exception:
+            pass
+    return fresh, link_framing
+
+
+def _copy_ids_for_link_framing(link_doc, elements):
+    """Build CopyElements ids — copy link groups whole, not individual members."""
+    invalid = DB.ElementId.InvalidElementId
+    elements = [e for e in elements if e is not None]
+    if not elements:
+        return List[DB.ElementId]()
+
+    grouped = {}
+    loose = []
+    for el in elements:
+        gid = el.GroupId
+        if gid is not None and gid != invalid:
+            grouped.setdefault(gid.IntegerValue, []).append(el)
+        else:
+            loose.append(el)
+
+    ids = List[DB.ElementId]()
+    for gid_int in grouped:
+        ids.Add(DB.ElementId(gid_int))
+    for el in loose:
+        ids.Add(el.Id)
+    return ids
+
+
+def _expand_copy_ids_from_groups(link_doc, src_ids):
+    """If batch copy fails, replace group ids with their member ids."""
+    invalid = DB.ElementId.InvalidElementId
+    expanded = List[DB.ElementId]()
+    for eid in src_ids:
+        el = link_doc.GetElement(eid)
+        if el is None:
+            continue
+        if isinstance(el, DB.Group):
+            try:
+                for mid in el.GetMemberIds():
+                    expanded.Add(mid)
+            except Exception:
+                expanded.Add(eid)
+        else:
+            expanded.Add(eid)
+    return expanded
+
+
+def _copy_link_framing_to_host(link_doc, src_ids, host_doc, transform, copy_opts):
+    """Copy link framing to host; fall back to members / one-by-one."""
+    if src_ids is None or src_ids.Count == 0:
+        return []
+
+    attempts = [src_ids, _expand_copy_ids_from_groups(link_doc, src_ids)]
+    seen = set()
+    ordered = []
+    for attempt in attempts:
+        for eid in attempt:
+            i = eid.IntegerValue
+            if i not in seen:
+                seen.add(i)
+                ordered.append(eid)
+
+    for attempt in attempts:
+        batch = List[DB.ElementId]()
+        for eid in attempt:
+            if link_doc.GetElement(eid) is not None:
+                batch.Add(eid)
+        if batch.Count == 0:
+            continue
+        try:
+            return list(
+                DB.ElementTransformUtils.CopyElements(
+                    link_doc,
+                    batch,
+                    host_doc,
+                    transform,
+                    copy_opts,
+                )
+            )
+        except Exception:
+            pass
+
+    results = []
+    for eid in ordered:
+        if link_doc.GetElement(eid) is None:
+            continue
+        one = List[DB.ElementId]()
+        one.Add(eid)
+        try:
+            new_ids = DB.ElementTransformUtils.CopyElements(
+                link_doc,
+                one,
+                host_doc,
+                transform,
+                copy_opts,
+            )
+            results.extend(list(new_ids))
+        except Exception:
+            pass
+    return results
+
+
 def _remove_host_framing_for_panel(host_doc, pid):
     """Delete copied host framing for one panel so link copy can run again."""
     removed = 0
+    asm = host_assembly_for_panel(host_doc, pid)
+    if asm is not None:
+        try:
+            host_doc.Delete(asm.Id)
+        except Exception:
+            pass
     for asm in (
         DB.FilteredElementCollector(host_doc)
         .OfClass(DB.AssemblyInstance)
@@ -2555,7 +2691,8 @@ def _remove_host_framing_for_panel(host_doc, pid):
                 host_doc.Delete(asm.Id)
             except Exception:
                 pass
-    for el in merge_framing_for_panel(map_framing(host_doc), pid):
+    host_map = map_framing(host_doc)
+    for el in merge_framing_for_panel(host_map, pid):
         try:
             gid = el.GroupId
             if gid is not None and gid != DB.ElementId.InvalidElementId:
@@ -2564,12 +2701,17 @@ def _remove_host_framing_for_panel(host_doc, pid):
                     grp.UngroupMembers()
         except Exception:
             pass
-    for el in merge_framing_for_panel(map_framing(host_doc), pid):
+    host_map = map_framing(host_doc)
+    for el in merge_framing_for_panel(host_map, pid):
         try:
             host_doc.Delete(el.Id)
             removed += 1
         except Exception:
             pass
+    try:
+        host_doc.Regenerate()
+    except Exception:
+        pass
     return removed
 
 
@@ -2622,10 +2764,10 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
         pass
     host_framing = map_framing(host_doc)
     copied_pids = []
-    known_pids = list(link_framing.keys())
 
     for pid in selected:
-        pairs = merge_link_framing_for_panel(link_framing, pid)
+        pairs, link_framing = _refresh_link_panel_framing(host_doc, pid)
+        known_pids = list(link_framing.keys())
         label = panel_display_name(pid)
         if not pairs:
             stats["skipped"].append("{} (no link framing)".format(label))
@@ -2644,10 +2786,11 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
             key = link_inst.Id.IntegerValue
             if key not in by_link:
                 by_link[key] = (link_inst, [])
-            by_link[key][1].append(elem.Id)
+            by_link[key][1].append(elem)
 
         panel_copied = False
-        for link_inst, elem_ids in by_link.values():
+        copy_failures = []
+        for link_inst, elems in by_link.values():
             link_doc = link_inst.GetLinkDocument()
             if link_doc is None:
                 stats["errors"].append(
@@ -2657,29 +2800,42 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
                 )
                 continue
             transform = link_inst.GetTotalTransform()
-            src_ids = List[DB.ElementId]()
-            for eid in elem_ids:
-                src_ids.Add(eid)
-            try:
-                new_ids = DB.ElementTransformUtils.CopyElements(
-                    link_doc,
-                    src_ids,
-                    host_doc,
-                    transform,
-                    copy_opts,
+            src_ids = _copy_ids_for_link_framing(link_doc, elems)
+            new_ids = _copy_link_framing_to_host(
+                link_doc, src_ids, host_doc, transform, copy_opts
+            )
+            if not new_ids:
+                copy_failures.append(
+                    "{} member(s) could not be copied from link".format(
+                        len(elems)
+                    )
                 )
-                flat, exploded = _flatten_copied_elements(
-                    host_doc, list(new_ids)
-                )
-                stats["groups_exploded"] += exploded
-                label_pid = source_container or pid
-                for el in flat:
-                    set_panel_labels(el, label_pid, known_pids=known_pids)
-                    stats["members_copied"] += 1
-                    panel_copied = True
-            except Exception as ex:
+                continue
+            flat, exploded = _flatten_copied_elements(host_doc, new_ids)
+            stats["groups_exploded"] += exploded
+            label_pid = source_container or pid
+            for el in flat:
+                if not _is_framing_element(el):
+                    continue
+                set_panel_labels(el, label_pid, known_pids=known_pids)
+                stats["members_copied"] += 1
+                panel_copied = True
+
+        if copy_failures and not panel_copied:
+            stats["errors"].append(
+                "{}: {} — try ungrouping panel framing in the link model "
+                "or reload the structural link".format(label, copy_failures[0])
+            )
+        elif panel_copied:
+            post_count = len(
+                merge_framing_for_panel(map_framing(host_doc), pid)
+            )
+            link_count = len(pairs)
+            if post_count < link_count:
                 stats["errors"].append(
-                    "{}: {}".format(label, _short_revit_error(ex))
+                    "{}: partial copy (host: {}, link: {})".format(
+                        label, post_count, link_count
+                    )
                 )
 
         if panel_copied:
