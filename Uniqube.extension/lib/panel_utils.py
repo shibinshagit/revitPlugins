@@ -1820,6 +1820,7 @@ def _create_panel_assembly(doc, pid, framing_ids, mep_ids=None):
     except Exception as ex:
         return False, _short_revit_error(ex)
 
+    asm_id = new_asm.Id
     _set_container(new_asm, container_name)
     set_panel_labels(new_asm, container_name)
     mk = new_asm.LookupParameter("Mark")
@@ -1836,9 +1837,15 @@ def _create_panel_assembly(doc, pid, framing_ids, mep_ids=None):
             doc, new_asm, mep_ids
         )
 
+    new_asm = doc.GetElement(asm_id)
+    if new_asm is None:
+        return False, "assembly lost after adding members"
+
     try:
         doc.Regenerate()
-        new_asm.AssemblyTypeName = container_name
+        new_asm = doc.GetElement(asm_id)
+        if new_asm is not None:
+            new_asm.AssemblyTypeName = container_name
         doc.Regenerate()
     except Exception as ex:
         msg = "assembly created; rename failed: {}".format(
@@ -2556,44 +2563,102 @@ def _is_framing_element(elem):
             return False
 
 
-def _refresh_link_panel_framing(host_doc, pid):
-    """Re-read link framing for one panel (live UniqueIds, loaded links only)."""
-    link_framing = map_link_framing_by_container(host_doc)
-    pairs = merge_link_framing_for_panel(link_framing, pid)
-    fresh = []
-    for link_inst, elem in pairs:
+def _collect_link_panel_framing_live(host_doc, pid):
+    """Scan loaded structural links for framing matching one panel id."""
+    pairs = []
+    for link_inst in (
+        DB.FilteredElementCollector(host_doc)
+        .OfClass(DB.RevitLinkInstance)
+        .ToElements()
+    ):
         link_doc = link_inst.GetLinkDocument()
         if link_doc is None:
             continue
-        try:
-            live = link_doc.GetElement(elem.UniqueId)
-            if live is not None and _is_framing_element(live):
-                fresh.append((link_inst, live))
-        except Exception:
-            pass
-    return fresh, link_framing
+        framing = (
+            DB.FilteredElementCollector(link_doc)
+            .OfCategory(DB.BuiltInCategory.OST_StructuralFraming)
+            .WhereElementIsNotElementType()
+            .ToElements()
+        )
+        for beam in framing:
+            val = _read_container_value(beam)
+            if val and panel_ids_match(val, pid):
+                pairs.append((link_inst, beam))
+    return pairs
 
 
-def _copy_ids_for_link_framing(link_doc, elements):
-    """Build CopyElements ids — copy link groups whole, not individual members."""
+def _refresh_link_panel_framing(host_doc, pid):
+    """Live link framing for one panel — always query the link document."""
+    pairs = _collect_link_panel_framing_live(host_doc, pid)
+    link_framing = map_link_framing_by_container(host_doc)
+    return pairs, link_framing
+
+
+def _expand_link_framing_leaves(link_doc, elements, pid):
+    """Expand groups/assemblies; return framing leaves for this panel only."""
     invalid = DB.ElementId.InvalidElementId
-    elements = [e for e in elements if e is not None]
-    if not elements:
-        return List[DB.ElementId]()
+    queue = list(elements)
+    seen = set()
+    expanded_groups = set()
+    expanded_asms = set()
+    leaves = []
+    leaf_ids = set()
 
-    grouped = {}
-    loose = []
-    for el in elements:
+    while queue:
+        el = queue.pop()
+        if el is None:
+            continue
+        eid = el.Id.IntegerValue
+        if eid in seen:
+            continue
+        seen.add(eid)
+
+        aid = el.AssemblyInstanceId
+        if aid is not None and aid != invalid:
+            ai = aid.IntegerValue
+            if ai not in expanded_asms:
+                expanded_asms.add(ai)
+                asm = link_doc.GetElement(aid)
+                if asm is not None:
+                    try:
+                        for mid in asm.GetMemberIds():
+                            queue.append(link_doc.GetElement(mid))
+                    except Exception:
+                        pass
+
         gid = el.GroupId
         if gid is not None and gid != invalid:
-            grouped.setdefault(gid.IntegerValue, []).append(el)
-        else:
-            loose.append(el)
+            gi = gid.IntegerValue
+            if gi not in expanded_groups:
+                expanded_groups.add(gi)
+                group = link_doc.GetElement(gid)
+                if group is not None and isinstance(group, DB.Group):
+                    try:
+                        for mid in group.GetMemberIds():
+                            queue.append(link_doc.GetElement(mid))
+                    except Exception:
+                        pass
 
+        if not _is_framing_element(el):
+            continue
+        val = _read_container_value(el)
+        if val and panel_ids_match(val, pid) and eid not in leaf_ids:
+            leaf_ids.add(eid)
+            leaves.append(el)
+
+    return leaves
+
+
+def _copy_ids_for_link_framing(link_doc, elements, pid):
+    """Copy ids for one panel — never a multi-panel link group shell."""
+    leaves = _expand_link_framing_leaves(link_doc, elements, pid)
     ids = List[DB.ElementId]()
-    for gid_int in grouped:
-        ids.Add(DB.ElementId(gid_int))
-    for el in loose:
+    seen = set()
+    for el in leaves:
+        i = el.Id.IntegerValue
+        if i in seen:
+            continue
+        seen.add(i)
         ids.Add(el.Id)
     return ids
 
@@ -2800,7 +2865,12 @@ def copy_panel_framing_to_host(host_doc, view, selected, link_framing=None, regr
                 )
                 continue
             transform = link_inst.GetTotalTransform()
-            src_ids = _copy_ids_for_link_framing(link_doc, elems)
+            src_ids = _copy_ids_for_link_framing(link_doc, elems, pid)
+            if src_ids.Count == 0:
+                copy_failures.append(
+                    "no copyable framing ids (check link groups/assemblies)"
+                )
+                continue
             new_ids = _copy_link_framing_to_host(
                 link_doc, src_ids, host_doc, transform, copy_opts
             )
