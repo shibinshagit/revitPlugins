@@ -473,9 +473,70 @@ def _fitting_serves_panel_run(el, pid, host_assignments, panel_outlines, valid_i
     return False
 
 
-def _fitting_on_crossing_run(el, panel_outlines, valid_ids):
-    """True when a fitting joins any run that exits the panel (exit elbows/tees)."""
+def _fitting_part_type_name(el):
+    for pname in ("Part Type", BEND_OR_FITTING_PARAM):
+        p = el.LookupParameter(pname)
+        if p and p.HasValue:
+            val = p.AsString()
+            if val and val.strip():
+                return val.strip().lower()
+    return ""
+
+
+def _fitting_connectors_collinear(el):
+    """True when a two-port fitting continues a run (coupling-like)."""
+    cm = _get_mep_connector_manager(el)
+    if cm is None:
+        return False
+    try:
+        connectors = list(cm.Connectors)
+    except Exception:
+        return False
+    if len(connectors) != 2:
+        return False
+    try:
+        d0 = connectors[0].CoordinateSystem.BasisZ
+        d1 = connectors[1].CoordinateSystem.BasisZ
+        return abs(d0.DotProduct(d1)) > 0.95
+    except Exception:
+        return False
+
+
+def _is_inline_fitting(el):
+    """True for couplings/unions — fittings that continue a run without bending."""
     if not _is_mep_connection(el):
+        return False
+    if _is_conduit_bend(el):
+        return False
+
+    part = _fitting_part_type_name(el)
+    if part:
+        if any(k in part for k in ("coupling", "union", "cap", "plug", "flange")):
+            return True
+        if any(
+            k in part
+            for k in ("elbow", "tee", "wye", "cross", "lateral", "transition", "offset")
+        ):
+            return False
+
+    try:
+        if isinstance(el, DB.FamilyInstance):
+            fname = (el.Symbol.FamilyName or "").lower()
+            if "coupling" in fname or " union" in fname or fname.startswith("union"):
+                return True
+            if any(k in fname for k in ("elbow", " tee", "tee ", "wye", "bend")):
+                return False
+    except Exception:
+        pass
+
+    return _fitting_connectors_collinear(el)
+
+
+def _fitting_on_crossing_run(el, panel_outlines, valid_ids):
+    """True for exit elbows/tees on runs that leave the panel — not inline couplings."""
+    if not _is_mep_connection(el):
+        return False
+    if _is_inline_fitting(el):
         return False
     for nb in _mep_network_neighbors(el, valid_ids):
         if isinstance(nb, DB.MEPCurve) and _curve_crosses_panel_boundary(
