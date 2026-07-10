@@ -712,22 +712,48 @@ def _fitting_on_crossing_run(
         return True
     if _connectors_cross_panel_boundary(el, panel_outlines):
         return True
-    if not _mep_entirely_outside_panels(el, panel_outlines):
+    if _mep_entirely_outside_panels(el, panel_outlines):
         for nb in _mep_network_neighbors(el, valid_ids):
-            if not _is_linear_mep_curve(nb):
-                continue
-            if _mep_entirely_outside_panels(nb, panel_outlines):
-                return True
-            if _is_panel_crossing_for_color(
-                nb,
-                panel_outlines,
-                track_spans,
-                valid_ids,
-                host_assignments,
+            if _is_linear_mep_curve(nb):
+                if not _mep_entirely_outside_panels(nb, panel_outlines):
+                    return True
+                nb_start, nb_end = _endpoint_panels(nb, panel_outlines)
+                nb_touched = _panels_touched_by_curve(
+                    nb, panel_outlines, nb_start, nb_end
+                )
+                for pid in nb_touched:
+                    if _curve_exits_panel_volume(
+                        nb, pid, panel_outlines, track_spans
+                    ):
+                        return True
+                if _curve_crosses_panel_boundary(
+                    nb, panel_outlines, track_spans
+                ):
+                    return True
+            elif _is_mep_connection(nb):
+                for nb2 in _mep_network_neighbors(nb, valid_ids):
+                    if _is_linear_mep_curve(nb2):
+                        if not _mep_entirely_outside_panels(
+                            nb2, panel_outlines
+                        ):
+                            return True
+        return False
+    for nb in _mep_network_neighbors(el, valid_ids):
+        if not _is_linear_mep_curve(nb):
+            continue
+        if _mep_entirely_outside_panels(nb, panel_outlines):
+            return True
+        nb_start, nb_end = _endpoint_panels(nb, panel_outlines)
+        nb_touched = _panels_touched_by_curve(
+            nb, panel_outlines, nb_start, nb_end
+        )
+        for pid in nb_touched:
+            if _curve_exits_panel_volume(
+                nb, pid, panel_outlines, track_spans
             ):
                 return True
-            if _curve_crosses_panel_boundary(nb, panel_outlines, track_spans):
-                return True
+        if _curve_crosses_panel_boundary(nb, panel_outlines, track_spans):
+            return True
     return False
 
 
@@ -936,15 +962,17 @@ def _linear_mep_in_exit_column(el, panel_outlines, track_spans):
         if not span or outline is None:
             continue
         z0, z1 = span
-        in_xy = False
+        inside_xy = False
+        outside_xy = False
         outside_track = False
-        for pt in _curve_sample_points(el):
-            if not _point_in_outline_xy(pt, outline, tol):
-                continue
-            in_xy = True
-            if pt.Z > z1 + tol or pt.Z < z0 - tol:
-                outside_track = True
-        if in_xy and outside_track:
+        for pt in _curve_dense_sample_points(el):
+            if _point_in_outline_xy(pt, outline, tol):
+                inside_xy = True
+                if pt.Z > z1 + tol or pt.Z < z0 - tol:
+                    outside_track = True
+            else:
+                outside_xy = True
+        if inside_xy and (outside_track or outside_xy):
             return True
     return False
 
@@ -1117,7 +1145,22 @@ def _is_panel_crossing_for_color(
         el, panel_outlines, track_spans, valid_ids, host_assignments
     ):
         return True
+    if valid_ids and _mep_entirely_outside_panels(el, panel_outlines):
+        if _linear_mep_connected_to_inside_panel(
+            el, panel_outlines, valid_ids, host_assignments
+        ):
+            return True
     return False
+
+
+def _is_mep_element(el):
+    cat = el.Category
+    if cat is None:
+        return False
+    try:
+        return cat.BuiltInCategory in MEP_CATS
+    except Exception:
+        return False
 
 
 def _mep_belongs_in_panel_for_color(
@@ -1133,6 +1176,13 @@ def _mep_belongs_in_panel_for_color(
             ):
                 return False
         return _curve_fully_inside_panel(el, panel_outlines, pid, track_spans)
+    if _is_mep_connection(el):
+        if _fitting_on_crossing_run(
+            el, panel_outlines, valid_ids, track_spans, host_assignments
+        ):
+            return False
+        if _mep_entirely_outside_panels(el, panel_outlines):
+            return False
     return _mep_belongs_in_panel(
         el, pid, panel_outlines, host_assignments, valid_ids
     )
@@ -2684,7 +2734,9 @@ def _rename_panel_assembly(doc, asm, container_name):
             asm.AssemblyTypeName = name
             doc.Regenerate()
             asm = doc.GetElement(asm.Id)
-            if asm is not None and panel_ids_match(asm.AssemblyTypeName, container_name):
+            if asm is not None and panel_ids_match(
+                asm.AssemblyTypeName, container_name
+            ):
                 return True
         except Exception:
             continue
@@ -2692,13 +2744,20 @@ def _rename_panel_assembly(doc, asm, container_name):
         asm = doc.GetElement(asm.Id)
         if asm is None:
             return False
-        asm_type = doc.GetElement(asm.GetTypeId())
+        type_id = asm.GetTypeId()
+        if type_id is None or type_id == DB.ElementId.InvalidElementId:
+            return False
+        asm_type = doc.GetElement(type_id)
         if asm_type is not None:
             for name in candidates:
                 try:
                     asm_type.Name = name
                     doc.Regenerate()
-                    return True
+                    asm = doc.GetElement(asm.Id)
+                    if asm is not None and panel_ids_match(
+                        asm.AssemblyTypeName, container_name
+                    ):
+                        return True
                 except Exception:
                     continue
     except Exception:
@@ -2769,14 +2828,6 @@ def _create_panel_assembly(doc, pid, framing_ids, mep_ids=None):
             "MEP in assembly: {}".format(mep_added)
         )
 
-    if not _rename_panel_assembly(doc, new_asm, container_name):
-        msg = "assembly created; rename to {} failed".format(
-            panel_display_name(container_name)
-        )
-        if mep_skipped:
-            msg += " (MEP in assembly: {})".format(mep_added)
-        return True, msg
-
     if mep_ids is not None and mep_ids.Count > 0:
         if mep_added == 0:
             return True, (
@@ -2791,6 +2842,90 @@ def _create_panel_assembly(doc, pid, framing_ids, mep_ids=None):
                 )
             )
     return True, None
+
+
+def finalize_panel_assembly_names(doc, selected, panel_elements=None):
+    """Rename panel assemblies after transaction commit (Revit finalizes types)."""
+    if panel_elements is None:
+        panel_elements = map_framing(doc)
+    stats = {"renamed": 0, "failed": []}
+    for pid in selected:
+        asm = host_assembly_for_panel(doc, pid)
+        if asm is None:
+            continue
+        container_name = _read_container_value(asm)
+        if not container_name:
+            ids = List[DB.ElementId]()
+            for el in merge_framing_for_panel(panel_elements, pid)[:8]:
+                ids.Add(el.Id)
+            container_name = _assembly_container_name(doc, pid, ids)
+        if not container_name:
+            container_name = pid
+        if _rename_panel_assembly(doc, asm, container_name):
+            stats["renamed"] += 1
+        else:
+            stats["failed"].append(panel_display_name(pid))
+        asm = host_assembly_for_panel(doc, pid)
+        if asm is not None:
+            _set_container(asm, container_name)
+            mk = asm.LookupParameter("Mark")
+            if mk and not mk.IsReadOnly:
+                try:
+                    mk.Set(panel_display_name(container_name))
+                except Exception:
+                    pass
+    return stats
+
+
+def strip_crossing_mep_from_panel_assemblies(
+    doc,
+    view,
+    selected,
+    panel_elements,
+    link_zones,
+    interior_outlines,
+    resolved_track_spans,
+    mep_assignments,
+    red_settings,
+):
+    """Remove exit/crossing MEP mistakenly added to panel assemblies."""
+    valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
+    removed = 0
+    for pid in selected:
+        asm = host_assembly_for_panel(doc, pid)
+        if asm is None:
+            continue
+        to_remove = List[DB.ElementId]()
+        for mid in asm.GetMemberIds():
+            el = doc.GetElement(mid)
+            if el is None or not _is_mep_element(el):
+                continue
+            if _is_panel_crossing_for_color(
+                el,
+                interior_outlines,
+                resolved_track_spans,
+                valid_ids,
+                mep_assignments,
+            ):
+                to_remove.Add(mid)
+        if to_remove.Count == 0:
+            continue
+        try:
+            asm.RemoveMemberIds(to_remove)
+            removed += to_remove.Count
+            for eid in to_remove:
+                el = doc.GetElement(eid)
+                if el is None:
+                    continue
+                view.SetElementOverrides(eid, red_settings)
+                _clear_container(el)
+        except Exception:
+            pass
+    try:
+        doc.Regenerate()
+    except Exception:
+        pass
+    return removed
 
 
 def _delete_assemblies_in_doc(doc, selected):
@@ -3538,6 +3673,18 @@ def combine_panels_group_color(
             stats["skipped_empty"] += 1
         elif framing_ids.Count == 0 and not has_link:
             stats["skipped_empty"] += 1
+
+    stats["assembly_members_stripped"] = strip_crossing_mep_from_panel_assemblies(
+        doc,
+        view,
+        selected,
+        panel_elements,
+        link_zones,
+        interior_outlines,
+        resolved_track_spans,
+        mep_assignments,
+        red_settings,
+    )
 
     return stats
 

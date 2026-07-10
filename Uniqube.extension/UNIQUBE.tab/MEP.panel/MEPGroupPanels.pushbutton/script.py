@@ -191,6 +191,17 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
                 tag_mep=True,
             )
             copy_stats["host_groups"] = group_stats.get("groups", 0)
+
+        with revit.Transaction("UNIQUBE: Name Panel Assemblies"):
+            name_stats = pu.finalize_panel_assembly_names(
+                doc, selected, panel_elements
+            )
+            group_stats["assemblies_renamed"] = name_stats.get("renamed", 0)
+            if name_stats.get("failed"):
+                group_stats.setdefault("group_errors", []).extend([
+                    "{}: assembly rename failed".format(p)
+                    for p in name_stats["failed"][:5]
+                ])
     except Exception as ex:
         forms.alert("Prepare MEP Panels failed:\n{}".format(ex), title="UNIQUBE")
         return
@@ -213,7 +224,9 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
         "4. Framing members copied: {6}\n"
         "5. Host assemblies (framing + MEP): {7}\n"
         "6. Panel crossings (red pipes/fittings): {8}\n"
-        "7. Selection sync: {9}".format(
+        "7. Exit MEP removed from assemblies: {11}\n"
+        "8. Assemblies renamed to panel id: {12}\n"
+        "9. Selection sync: {9}".format(
             tag_stats.get("tagged", 0),
             tag_stats.get("updated", 0),
             tag_stats.get("propagated", 0),
@@ -225,6 +238,8 @@ def _run_host_doc(selected, panel_elements, link_zones, link_framing):
             group_stats.get("crossing_count", 0),
             "ON" if sync_on else "OFF",
             tag_stats.get("cleared_outside", 0),
+            group_stats.get("assembly_members_stripped", 0),
+            group_stats.get("assemblies_renamed", 0),
         )
     )
 

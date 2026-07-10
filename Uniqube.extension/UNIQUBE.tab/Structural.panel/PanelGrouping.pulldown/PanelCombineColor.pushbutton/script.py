@@ -55,16 +55,23 @@ def main():
             tag_mep=True,
         )
 
+    with revit.Transaction("UNIQUBE: Name Panel Assemblies"):
+        name_stats = pu.finalize_panel_assembly_names(doc, selected, panel_elements)
+
     forms.alert(
         "Done.\n\n"
         "Panels processed: {}\n"
         "Groups created: {}\n"
         "Crossing elements (red): {}\n"
+        "Exit MEP stripped from assemblies: {}\n"
+        "Assemblies renamed: {}\n"
         "Linked panel framing colored: {}\n"
         "Host MEP tagged: {}".format(
             len(selected),
             stats["groups"],
             stats["crossing_count"],
+            stats.get("assembly_members_stripped", 0),
+            name_stats.get("renamed", 0),
             stats["link_framing_colored"],
             stats["mep_tagged"],
         ),
