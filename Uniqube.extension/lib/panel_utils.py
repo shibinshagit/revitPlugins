@@ -556,6 +556,37 @@ def _curve_pierces_track_envelope(el, pid, panel_outlines, track_spans):
     return False
 
 
+def _curve_exits_panel_volume(el, pid, panel_outlines, track_spans=None):
+    """True when any part of a run leaves the panel interior or track envelope."""
+    if track_spans and _curve_pierces_track_envelope(
+        el, pid, panel_outlines, track_spans
+    ):
+        return True
+    outline = panel_outlines.get(pid)
+    if outline is None:
+        return False
+    inside = False
+    outside = False
+    for pt in _curve_dense_sample_points(el):
+        if _point_in_outline(pt, outline):
+            inside = True
+        else:
+            outside = True
+        if inside and outside:
+            return True
+    bbox = el.get_BoundingBox(None)
+    if bbox is not None:
+        for x in (bbox.Min.X, bbox.Max.X):
+            for y in (bbox.Min.Y, bbox.Max.Y):
+                for z in (bbox.Min.Z, bbox.Max.Z):
+                    pt = DB.XYZ(x, y, z)
+                    if _point_in_outline(pt, outline):
+                        inside = True
+                    else:
+                        outside = True
+    return inside and outside
+
+
 def _curve_fully_inside_panel(el, panel_outlines, pid, track_spans=None):
     """True when the full run stays inside the panel track/interior volume."""
     if not _is_linear_mep_curve(el):
@@ -565,13 +596,7 @@ def _curve_fully_inside_panel(el, panel_outlines, pid, track_spans=None):
         _panels_matching(pid, start_p) and _panels_matching(pid, end_p)
     ):
         return False
-    if _curve_samples_outside_panel(
-        el, panel_outlines, pid, track_spans
-    ):
-        return False
-    if track_spans and _curve_pierces_track_envelope(
-        el, pid, panel_outlines, track_spans
-    ):
+    if _curve_exits_panel_volume(el, pid, panel_outlines, track_spans):
         return False
     return True
 
@@ -673,7 +698,9 @@ def _is_inline_fitting(el):
     return _fitting_connectors_collinear(el)
 
 
-def _fitting_on_crossing_run(el, panel_outlines, valid_ids, track_spans=None):
+def _fitting_on_crossing_run(
+    el, panel_outlines, valid_ids, track_spans=None, host_assignments=None
+):
     """True for exit elbows/tees on runs that leave the panel — not inline couplings."""
     if not _is_mep_connection(el):
         return False
@@ -685,11 +712,22 @@ def _fitting_on_crossing_run(el, panel_outlines, valid_ids, track_spans=None):
         return True
     if _connectors_cross_panel_boundary(el, panel_outlines):
         return True
-    for nb in _mep_network_neighbors(el, valid_ids):
-        if _is_linear_mep_curve(nb) and _curve_crosses_panel_boundary(
-            nb, panel_outlines, track_spans
-        ):
-            return True
+    if not _mep_entirely_outside_panels(el, panel_outlines):
+        for nb in _mep_network_neighbors(el, valid_ids):
+            if not _is_linear_mep_curve(nb):
+                continue
+            if _mep_entirely_outside_panels(nb, panel_outlines):
+                return True
+            if _is_panel_crossing_for_color(
+                nb,
+                panel_outlines,
+                track_spans,
+                valid_ids,
+                host_assignments,
+            ):
+                return True
+            if _curve_crosses_panel_boundary(nb, panel_outlines, track_spans):
+                return True
     return False
 
 
@@ -711,7 +749,7 @@ def _mep_belongs_in_assembly(
         )
     if _is_mep_connection(el):
         if _fitting_on_crossing_run(
-            el, panel_outlines, valid_ids, track_spans
+            el, panel_outlines, valid_ids, track_spans, host_assignments
         ):
             return False
         return _fitting_serves_panel_run(
@@ -1044,17 +1082,20 @@ def _linear_mep_exits_panel_track(
 def _is_panel_crossing_for_color(
     el, panel_outlines, track_spans, valid_ids=None, host_assignments=None
 ):
-    """Red view override: linear runs that exit the panel, not outside-only pieces."""
+    """Red view override: MEP that exits the panel, not inside-only pieces."""
+    if _is_mep_connection(el) and not _is_inline_fitting(el):
+        return _fitting_on_crossing_run(
+            el, panel_outlines, valid_ids, track_spans, host_assignments
+        )
     if not _is_linear_mep_curve(el):
         return False
-    if track_spans:
-        start_p, end_p = _endpoint_panels(el, panel_outlines)
-        touched = _panels_touched_by_curve(el, panel_outlines, start_p, end_p)
-        for pid in touched:
-            if _curve_pierces_track_envelope(
-                el, pid, panel_outlines, track_spans
-            ):
-                return True
+    start_p, end_p = _endpoint_panels(el, panel_outlines)
+    touched = _panels_touched_by_curve(el, panel_outlines, start_p, end_p)
+    for pid in touched:
+        if _curve_exits_panel_volume(
+            el, pid, panel_outlines, track_spans
+        ):
+            return True
     if _connectors_cross_panel_boundary(el, panel_outlines):
         return True
     if track_spans and _connectors_cross_track_boundary(
@@ -2590,6 +2631,48 @@ def _add_mep_members_to_assembly(doc, asm, mep_ids):
     return added, skipped
 
 
+def _rename_panel_assembly(doc, asm, container_name):
+    """Rename assembly type to match BIMSF_Container (e.g. WP-3)."""
+    if asm is None:
+        return False
+    candidates = []
+    for val in [
+        panel_display_name(container_name),
+        panel_group_name(container_name),
+        container_name,
+    ]:
+        if val and val not in candidates:
+            candidates.append(val)
+    for name in candidates:
+        try:
+            asm = doc.GetElement(asm.Id)
+            if asm is None:
+                continue
+            asm.AssemblyTypeName = name
+            doc.Regenerate()
+            asm = doc.GetElement(asm.Id)
+            if asm is not None and panel_ids_match(asm.AssemblyTypeName, container_name):
+                return True
+        except Exception:
+            continue
+    try:
+        asm = doc.GetElement(asm.Id)
+        if asm is None:
+            return False
+        asm_type = doc.GetElement(asm.GetTypeId())
+        if asm_type is not None:
+            for name in candidates:
+                try:
+                    asm_type.Name = name
+                    doc.Regenerate()
+                    return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
 def _create_panel_assembly(doc, pid, framing_ids, mep_ids=None):
     """Create a Revit assembly from framing, then add MEP members.
 
@@ -2653,15 +2736,9 @@ def _create_panel_assembly(doc, pid, framing_ids, mep_ids=None):
             "MEP in assembly: {}".format(mep_added)
         )
 
-    try:
-        doc.Regenerate()
-        new_asm = doc.GetElement(new_asm.Id)
-        if new_asm is not None:
-            new_asm.AssemblyTypeName = container_name
-        doc.Regenerate()
-    except Exception as ex:
-        msg = "assembly created; rename failed: {}".format(
-            _short_revit_error(ex)
+    if not _rename_panel_assembly(doc, new_asm, container_name):
+        msg = "assembly created; rename to {} failed".format(
+            panel_display_name(container_name)
         )
         if mep_skipped:
             msg += " (MEP in assembly: {})".format(mep_added)
