@@ -2150,12 +2150,31 @@ def preview_mep_counts(doc, panel_elements, link_zones):
 
 
 def preview_crossing_mep(doc, panel_elements, link_zones):
-    """Return count of panel-crossing connections and connecting pipe segments."""
+    """Return count of panel-crossing MEP elements (same rules as Prepare MEP)."""
     mep_assignments, _, _, _ = assign_mep_to_panels(
         doc, panel_elements, link_zones
     )
-    _, interior_outlines, _ = _build_panel_outlines(panel_elements, link_zones)
-    return _count_crossing_connections(doc, mep_assignments, interior_outlines)
+    _, interior_outlines, track_spans = _build_panel_outlines(
+        panel_elements, link_zones
+    )
+    resolved_track_spans = _resolved_track_spans(
+        panel_elements, link_zones, track_spans
+    )
+    valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
+    count = 0
+    for eid in mep_assignments.keys():
+        el = doc.GetElement(eid)
+        if el is None:
+            continue
+        if _is_panel_crossing_for_color(
+            el,
+            interior_outlines,
+            resolved_track_spans,
+            valid_ids,
+            mep_assignments,
+        ):
+            count += 1
+    return count
 
 
 def build_panel_catalog(doc):
@@ -2364,7 +2383,12 @@ def fill_mep_bimsf_containers(
         doc, panel_elements, link_zones
     )
     stats["propagated"] = assign_stats.get("propagated", 0)
-    _, interior_outlines, _ = _build_panel_outlines(panel_elements, link_zones)
+    _, interior_outlines, track_spans = _build_panel_outlines(
+        panel_elements, link_zones
+    )
+    resolved_track_spans = _resolved_track_spans(
+        panel_elements, link_zones, track_spans
+    )
     known_pids = list(get_all_panel_ids(panel_elements, link_zones))
     valid_ids = set(eid.IntegerValue for eid in mep_assignments.keys())
 
@@ -2378,8 +2402,12 @@ def fill_mep_bimsf_containers(
                 stats["cleared_bends"] += 1
             continue
 
-        if _is_panel_crossing_connection(
-            el, mep_assignments, interior_outlines, valid_ids
+        if _is_panel_crossing_for_color(
+            el,
+            interior_outlines,
+            resolved_track_spans,
+            valid_ids,
+            mep_assignments,
         ):
             if clear_crossings and _clear_container(el):
                 stats["cleared_crossing"] += 1
@@ -2407,8 +2435,13 @@ def fill_mep_bimsf_containers(
             stats["unassigned"] += 1
             continue
 
-        if not _mep_belongs_in_panel(
-            el, pid, interior_outlines, mep_assignments, valid_ids
+        if not _mep_belongs_in_panel_for_color(
+            el,
+            pid,
+            interior_outlines,
+            mep_assignments,
+            valid_ids,
+            resolved_track_spans,
         ):
             if _read_container_value(el) and _clear_container(el):
                 stats["cleared_outside"] += 1
