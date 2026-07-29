@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Generate UNIQUBE pyRevit ribbon icons from Fluent UI (via Iconify API).
 
 Icons: Microsoft Fluent UI System Icons (MIT)
@@ -84,6 +84,9 @@ ICON_MAP = {
     ),
     "UNIQUBE.tab/Structural.panel/MasterPanelList.pushbutton": (
         "clipboard-task-24-regular", True
+    ),
+    "UNIQUBE.tab/Structural.panel/GenerateCNC.pushbutton": (
+        "cut-24-regular", False
     ),
     "UNIQUBE.tab/MEP.panel/BOMExtraction.pushbutton": (
         "document-table-24-regular", False
@@ -195,7 +198,7 @@ def main():
     if errors:
         print("\n{} icon(s) failed.".format(len(errors)))
         raise SystemExit(1)
-    print("\nDone — {} Fluent UI icons at 96x96 / 96 DPI.".format(len(ICON_MAP)))
+    print("\nDone â€” {} Fluent UI icons at 96x96 / 96 DPI.".format(len(ICON_MAP)))
 
 
 if __name__ == "__main__":

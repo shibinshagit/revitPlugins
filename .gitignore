@@ -1,6 +1,12 @@
-.DS_Store
+﻿.DS_Store
 Thumbs.db
 *.pyc
 __pycache__/
 *.bak
 *~
+# Local secrets — never commit API keys
+**/vibe_secrets.json
+**/.env
+**/.env.*
+# Local-only Revit publish button (dev) — keep on disk, do not push
+**/PublishLocal.pushbutton/

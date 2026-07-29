@@ -1,0 +1,5 @@
+title: Publish Live
+tooltip: >-
+  Export host + linked models to IFC and publish to the LIVE Uniqube API.
+  First publish creates a project; later publishes update the same project.
+author: Uniqube

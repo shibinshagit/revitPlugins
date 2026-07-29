@@ -1,5 +1,5 @@
-title: Structural
-tooltip: BIMSF panel setup, grouping, assemblies, and reporting tools.
+﻿title: Structural
+tooltip: BIMSF panel setup, grouping, assemblies, reporting, and CNC export.
 author: Uniqube
 layout:
   - PanelSetup
@@ -9,3 +9,4 @@ layout:
   - -----
   - AdvancePositionID
   - MasterPanelList
+  - GenerateCNC

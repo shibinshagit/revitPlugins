@@ -1,0 +1,5 @@
+title: Generate CNC
+tooltip: >-
+  Export CFS CNC CSV (COMPONENT + DIMPLE/SWAGE/LIP NOTCH/END_TRUSS) for floor
+  trusses and wall panels (BIMSF_Container) — one file per unit.
+author: Uniqube
