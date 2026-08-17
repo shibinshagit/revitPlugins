@@ -37,6 +37,12 @@ def load_secrets():
     if not text:
         return {}
     try:
+        from uniqube_text import json_ascii_text
+
+        text = json_ascii_text(text)
+    except Exception:
+        pass
+    try:
         return json.loads(text)
     except Exception as ex:
         raise Exception(

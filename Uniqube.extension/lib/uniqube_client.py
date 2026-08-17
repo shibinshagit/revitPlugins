@@ -13,6 +13,35 @@ from System.IO import File, StreamReader, MemoryStream
 from System.Net import HttpWebRequest, WebException, ServicePointManager, SecurityProtocolType
 from System.Text import Encoding
 
+try:
+    from uniqube_text import (
+        as_unicode,
+        as_net_string,
+        exception_text,
+        json_ascii_text,
+        safe_json,
+    )
+except Exception:
+    as_unicode = None
+    as_net_string = None
+    exception_text = None
+    json_ascii_text = None
+    safe_json = None
+
+
+def _json_field(obj):
+    """ASCII JSON that survives Revit names outside the ASCII range."""
+    if safe_json is not None:
+        return safe_json(obj)
+    return json.dumps(obj, ensure_ascii=True)
+
+
+def _json_parse(text):
+    """json.loads on a response that may carry non-ASCII project names."""
+    if json_ascii_text is not None:
+        return json.loads(json_ascii_text(text))
+    return json.loads(text)
+
 
 def _ensure_tls():
     """Prefer TLS 1.2+ for HTTPS (AWS ALB / modern APIs)."""
@@ -58,7 +87,7 @@ def _format_web_error(ex, context):
 
 
 def login(api_url, email, password):
-    """POST /api/auth/login → access token string."""
+    """POST /api/auth/login -> access token string."""
     _ensure_tls()
     url = api_url.rstrip("/") + "/api/auth/login"
     req = HttpWebRequest.Create(url)
@@ -66,7 +95,9 @@ def login(api_url, email, password):
     req.ContentType = "application/json"
     req.Timeout = 30000
     req.ReadWriteTimeout = 30000
-    body = Encoding.UTF8.GetBytes(json.dumps({"email": email, "password": password}))
+    body = Encoding.UTF8.GetBytes(
+        _json_field({"email": email, "password": password})
+    )
     req.ContentLength = body.Length
     stream = req.GetRequestStream()
     stream.Write(body, 0, body.Length)
@@ -80,7 +111,7 @@ def login(api_url, email, password):
     if not text or not str(text).strip():
         raise Exception("Login failed: empty response from {}".format(url))
     try:
-        data = json.loads(text)
+        data = _json_parse(text)
     except Exception as ex:
         raise Exception(
             "Login failed: invalid JSON from {} ({})\n{}".format(
@@ -139,7 +170,7 @@ def list_projects(api_url, token, limit=100):
         raise Exception(_format_web_error(ex, "List projects"))
     text = _read_response(resp)
     resp.Close()
-    data = json.loads(text)
+    data = _json_parse(text)
     projects = data.get("projects") or data.get("data") or []
     if not isinstance(projects, list):
         raise Exception("Unexpected projects response: {}".format(text[:300]))
@@ -185,6 +216,8 @@ def publish_files(
     encoding = Encoding.UTF8
 
     def write_str(s):
+        if as_unicode is not None:
+            s = as_unicode(s)
         bytes_ = encoding.GetBytes(s)
         stream.Write(bytes_, 0, bytes_.Length)
 
@@ -202,7 +235,7 @@ def publish_files(
             )
         )
         write_str("Content-Type: application/octet-stream\r\n\r\n")
-        file_bytes = File.ReadAllBytes(path)
+        file_bytes = File.ReadAllBytes(as_net_string(path) if as_net_string else path)
         stream.Write(file_bytes, 0, file_bytes.Length)
         write_str("\r\n")
 
@@ -210,16 +243,16 @@ def publish_files(
         write_field("projectId", str(int(project_id)))
     if project_name:
         write_field("projectName", project_name)
-    write_field("categories", json.dumps(list(categories)))
+    write_field("categories", _json_field(list(categories)))
 
     if browser_snapshot is not None:
-        write_field("browserSnapshot", json.dumps(browser_snapshot))
+        write_field("browserSnapshot", _json_field(browser_snapshot))
     if color_maps is not None:
-        write_field("colorMaps", json.dumps(color_maps))
+        write_field("colorMaps", _json_field(color_maps))
     if bimsf_maps is not None:
-        write_field("bimsfMaps", json.dumps(bimsf_maps))
+        write_field("bimsfMaps", _json_field(bimsf_maps))
     if drawing_manifest is not None:
-        # Paths are local — strip absolute paths before send; keep filenames/keys
+        # Paths are local - strip absolute paths before send; keep filenames/keys
         slim = []
         for m in drawing_manifest:
             slim.append({
@@ -232,7 +265,7 @@ def publish_files(
                 "dxfFileName": m.get("dxfFileName"),
                 "dwgFileName": m.get("dwgFileName"),
             })
-        write_field("drawingManifest", json.dumps(slim))
+        write_field("drawingManifest", _json_field(slim))
 
     for i, path in enumerate(file_paths):
         write_file("file{}".format(i), path)
@@ -250,11 +283,13 @@ def publish_files(
         err = ""
         if ex.Response:
             err = _read_response(ex.Response)
-        raise Exception("Publish failed: {}".format(err or str(ex)))
+        raise Exception("Publish failed: {}".format(
+            err or (exception_text(ex) if exception_text else str(ex))
+        ))
 
     text = _read_response(resp)
     resp.Close()
-    return json.loads(text)
+    return _json_parse(text)
 
 
 def wait_for_job(api_url, token, job_id, timeout_sec=3600, poll_sec=3):
@@ -272,7 +307,7 @@ def wait_for_job(api_url, token, job_id, timeout_sec=3600, poll_sec=3):
             resp = req.GetResponse()
             text = _read_response(resp)
             resp.Close()
-            last = json.loads(text)
+            last = _json_parse(text)
         except WebException as ex:
             err = ""
             if ex.Response:

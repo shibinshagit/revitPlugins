@@ -22,9 +22,13 @@ def _safe_str(val):
     if val is None:
         return ""
     try:
-        return str(val)
+        from uniqube_text import as_unicode
+        return as_unicode(val)
     except Exception:
-        return ""
+        try:
+            return str(val)
+        except Exception:
+            return ""
 
 
 def _view_type_name(view):

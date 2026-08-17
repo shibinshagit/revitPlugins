@@ -21,6 +21,8 @@ _lib = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."
 if _lib not in sys.path:
     sys.path.append(_lib)
 
+print("Publish Live starting...")
+
 if __name__ == "__main__":
     import uniqube_publish
 

@@ -2,14 +2,14 @@
 """Export BIMSF_Container (panel id) maps for Uniqube publish.
 
 Builds a sidecar map from THIS document only:
-  Revit ElementId / UniqueId / IFC GlobalId → BIMSF_Container
+  Revit ElementId / UniqueId / IFC GlobalId -> BIMSF_Container
 
 Structure and MEP are published separately into the same Uniqube project.
 The web viewer merges panel ids across loaded models so framing + MEP with
 the same BIMSF_Container can be multi-selected together.
 
 MEP prep workflow:
-  link Structure → Prepare MEP Panels (writes BIMSF on MEP) → remove link →
+  link Structure -> Prepare MEP Panels (writes BIMSF on MEP) -> remove link ->
   publish MEP alone.
 """
 
@@ -123,7 +123,7 @@ def build_bimsf_map(doc):
     by_panel = defaultdict(lambda: {"displayName": "", "elementIds": [], "count": 0, "bimsf": ""})
     elements = []
     seen = set()
-    # Assemblies with BIMSF — expand to members after first pass (FT / truss assemblies)
+    # Assemblies with BIMSF - expand to members after first pass (FT / truss assemblies)
     assembly_seeds = []  # (assembly_element, bimsf, display)
 
     def _add_element(element, bimsf, display=None, panel_name=None):

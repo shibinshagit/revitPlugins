@@ -73,7 +73,7 @@ def _color_to_hex(color):
 
 
 def _compress_guid_bytes(data):
-    """16-byte GUID (bytearray/list) → 22-char IFC GlobalId."""
+    """16-byte GUID (bytearray/list) -> 22-char IFC GlobalId."""
     arr = bytearray(data)
     if len(arr) != 16:
         raise ValueError("GUID must be 16 bytes")

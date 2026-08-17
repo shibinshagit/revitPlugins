@@ -5,6 +5,7 @@ from __future__ import print_function
 import os
 import shutil
 import tempfile
+import sys
 
 from Autodesk.Revit.DB import (
     FilteredElementCollector,
@@ -24,9 +25,66 @@ from Autodesk.Revit.DB import (
     ViewSchedule,
 )
 
+from uniqube_text import as_ascii_name, as_net_string, as_unicode, exception_text
+
+try:
+    from System.IO import Path, Directory, File as NetFile
+    from System import Guid
+except Exception:
+    Path = None
+    Directory = None
+    NetFile = None
+    Guid = None
+
+
+def _net_temp_dir(prefix):
+    """Create a temp folder via .NET so paths never go through IronPython codecs."""
+    if Path is None:
+        return tempfile.mkdtemp(prefix=prefix)
+    name = prefix + Guid.NewGuid().ToString("N").Substring(0, 8)
+    folder = Path.Combine(Path.GetTempPath(), name)
+    Directory.CreateDirectory(folder)
+    return folder
+
+
+def _net_ifc_files(folder):
+    """List *.ifc in folder using .NET (os.listdir blows up on byte 0xE1 filenames)."""
+    if Directory is None:
+        return []
+    try:
+        return list(Directory.GetFiles(folder, "*.ifc"))
+    except Exception:
+        return []
+
+
+def _mute_stdio():
+    class _N(object):
+        def write(self, *a, **k):
+            pass
+        def flush(self):
+            pass
+    return _N()
+
+
+def delete_temp_dir(folder):
+    """Delete a temp folder without os/shutil (avoids codec errors on IFC names)."""
+    if not folder:
+        return
+    if Directory is not None:
+        try:
+            if Directory.Exists(folder):
+                Directory.Delete(folder, True)
+                return
+        except Exception:
+            pass
+    try:
+        shutil.rmtree(folder, ignore_errors=True)
+    except Exception:
+        pass
+
 
 def infer_category(name):
-    n = (name or "").lower()
+    n = as_unicode(name).lower()
     if "mep" in n or "plumb" in n or "hvac" in n or "pipe" in n:
         return "mep"
     if "elect" in n or "power" in n or "light" in n:
@@ -39,9 +97,7 @@ def infer_category(name):
 
 
 def _safe_filename(name):
-    bad = '<>:"/\\|?*'
-    out = "".join(c if c not in bad else "_" for c in (name or "model"))
-    return out.strip() or "model"
+    return as_ascii_name(name, fallback="model")
 
 
 def _view_usable_for_ifc_filter(view):
@@ -72,7 +128,7 @@ def _view_usable_for_ifc_filter(view):
             "PressureLossReport",
             "Walkthrough",
         )
-        if str(vt) in bad_names:
+        if as_unicode(vt) in bad_names:
             return False
     except Exception:
         pass
@@ -109,13 +165,13 @@ def _pick_filter_view(doc, preferred_view=None):
     # Same name as preferred (useful when exporting a linked-model copy)
     if preferred_view is not None:
         try:
-            want = (preferred_view.Name or "").strip()
+            want = as_unicode(preferred_view.Name).strip()
             if want:
                 for v in FilteredElementCollector(doc).OfClass(View):
                     if not _view_usable_for_ifc_filter(v):
                         continue
-                    if (v.Name or "").strip() == want:
-                        return v, "view named '{}'".format(want)
+                    if as_unicode(v.Name).strip() == want:
+                        return v, "view named '{}'".format(as_ascii_name(want, "view"))
         except Exception:
             pass
 
@@ -140,7 +196,7 @@ def _pick_filter_view(doc, preferred_view=None):
 def _make_ifc_options(filter_view_id=None):
     """
     Build IFC options. When filter_view_id is set, only elements visible in
-    that view (category VV, filters, hide-element) are exported — same as
+    that view (category VV, filters, hide-element) are exported - same as
     Revit's 'Export only elements visible in view'.
     """
     options = IFCExportOptions()
@@ -155,17 +211,17 @@ def _make_ifc_options(filter_view_id=None):
         try:
             options.FilterViewId = filter_view_id
         except Exception as ex:
-            print("Uniqube: FilterViewId not set: {}".format(ex))
+            print("Uniqube: FilterViewId not set: {}".format(exception_text(ex)))
     return options
 
 
 def _param_str(el, names):
     """Read first non-empty string parameter by name (case-insensitive)."""
-    wanted = set((n or "").strip().lower() for n in names)
+    wanted = set(as_unicode(n).strip().lower() for n in names)
     try:
         for p in el.Parameters:
             try:
-                pname = (p.Definition.Name or "").strip().lower()
+                pname = as_unicode(p.Definition.Name).strip().lower()
                 if pname not in wanted:
                     continue
                 if p.HasValue:
@@ -175,8 +231,9 @@ def _param_str(el, names):
                             s = p.AsValueString()
                         except Exception:
                             s = None
-                    if s and str(s).strip():
-                        return str(s).strip()
+                    text = as_unicode(s).strip()
+                    if text:
+                        return text
             except Exception:
                 continue
     except Exception:
@@ -186,8 +243,8 @@ def _param_str(el, names):
 
 def _stamp_sheathing_labels_into_mark(doc):
     """
-    Revit Label (SH1…) often does not export to IFC.
-    Copy Label → Mark for sheathing so IFC Tag carries SH* for Uniqube hide toggle.
+    Revit Label (SH1...) often does not export to IFC.
+    Copy Label -> Mark for sheathing so IFC Tag carries SH* for Uniqube hide toggle.
     Returns list of (elementId, previousMark) for restore.
     """
     restored = []
@@ -199,7 +256,7 @@ def _stamp_sheathing_labels_into_mark(doc):
                 if not label:
                     continue
                 up = label.upper().strip()
-                # SH1 / SH12 / SH-01 — Revit Label on gypsum / sheathing boards
+                # SH1 / SH12 / SH-01 - Revit Label on gypsum / sheathing boards
                 is_sh_mark = len(up) >= 3 and up.startswith("SH") and (
                     up[2].isdigit() or up[2] in "-_"
                 )
@@ -209,19 +266,19 @@ def _stamp_sheathing_labels_into_mark(doc):
                 mark_param = el.get_Parameter(BuiltInParameter.ALL_MODEL_MARK)
                 if mark_param is None or mark_param.IsReadOnly:
                     continue
-                prev = ""
+                prev = u""
                 try:
-                    prev = mark_param.AsString() or ""
+                    prev = as_unicode(mark_param.AsString())
                 except Exception:
-                    prev = ""
-                if (prev or "").strip() == label:
+                    prev = u""
+                if prev.strip() == label:
                     continue
-                mark_param.Set(label)
+                mark_param.Set(as_net_string(label))
                 restored.append((el.Id, prev))
             except Exception:
                 continue
     except Exception as ex:
-        print("Uniqube: stamp Label→Mark skipped: {}".format(ex))
+        print("Uniqube: stamp Label->Mark skipped: {}".format(exception_text(ex)))
     if restored:
         print("Uniqube: stamped Label into Mark for {} element(s)".format(len(restored)))
     return restored
@@ -238,20 +295,30 @@ def _restore_marks(doc, previous):
             mark_param = el.get_Parameter(BuiltInParameter.ALL_MODEL_MARK)
             if mark_param is None or mark_param.IsReadOnly:
                 continue
-            mark_param.Set(prev or "")
+            mark_param.Set(as_net_string(prev or u""))
         except Exception:
             continue
 
 
 def _find_new_ifc(folder, before, preferred_base):
-    preferred = os.path.join(folder, preferred_base + ".ifc")
-    if os.path.isfile(preferred):
-        return preferred
-    after = set(f for f in os.listdir(folder) if f.lower().endswith(".ifc"))
-    new_files = sorted(after - before)
+    preferred_name = as_ascii_name(preferred_base, "model") + ".ifc"
+    try:
+        if Path is not None:
+            preferred = Path.Combine(folder, preferred_name)
+            if NetFile is not None and NetFile.Exists(preferred):
+                return preferred
+    except Exception:
+        pass
+    after = _net_ifc_files(folder)
+    before_set = set(as_unicode(p).lower() for p in (before or []))
+    new_files = []
+    for p in after:
+        if as_unicode(p).lower() in before_set:
+            continue
+        new_files.append(p)
     if not new_files:
-        raise Exception("IFC file not found after export (expected {}).".format(preferred))
-    return os.path.join(folder, new_files[-1])
+        raise Exception("IFC file not found after export (expected {}).".format(preferred_name))
+    return new_files[-1]
 
 
 def _export_primary_doc_to_ifc(
@@ -265,7 +332,7 @@ def _export_primary_doc_to_ifc(
     if getattr(doc, "IsLinked", False):
         raise Exception(
             "Refusing to export linked document '{}'. Open a primary copy first.".format(
-                doc.Title
+                as_ascii_name(doc.Title, "model")
             )
         )
 
@@ -277,40 +344,67 @@ def _export_primary_doc_to_ifc(
         if filter_view is not None:
             print(
                 "Uniqube: IFC visibility filter = '{}' ({})".format(
-                    filter_view.Name, how
+                    as_ascii_name(filter_view.Name, "view"), how
                 )
             )
         else:
             print(
-                "Uniqube: WARNING — no suitable view for visibility filter; "
-                "exporting entire model for '{}'".format(doc.Title)
+                "Uniqube: WARNING - no suitable view for visibility filter; "
+                "exporting entire model for '{}'".format(as_ascii_name(doc.Title, "model"))
             )
     else:
         print("Uniqube: IFC full model export (no view visibility filter)")
 
+    # Always a short ASCII name - Revit Title can contain U+00E1 (a) at index 3
+    export_name = "m" + as_ascii_name(base_name, "model")[:24]
+    export_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in export_name)
+    if not export_name:
+        export_name = "model"
+
     options = _make_ifc_options(filter_view_id=filter_id)
-    before = set(f for f in os.listdir(folder) if f.lower().endswith(".ifc"))
+    before = _net_ifc_files(folder)
+
+    ns_folder = folder
+    ns_name = export_name
+    try:
+        ns_folder = as_net_string(folder)
+        ns_name = as_net_string(export_name)
+    except Exception:
+        pass
 
     t = Transaction(doc, "Uniqube IFC Export")
     t.Start()
-    stamped = []
+    old_out, old_err = sys.stdout, sys.stderr
+    ok = False
     try:
-        stamped = _stamp_sheathing_labels_into_mark(doc)
-        ok = doc.Export(folder, base_name, options)
-        _restore_marks(doc, stamped)
+        sys.stdout = _mute_stdio()
+        sys.stderr = _mute_stdio()
+        ok = doc.Export(ns_folder, ns_name, options)
         t.Commit()
-    except Exception:
+    except Exception as export_ex:
         try:
-            _restore_marks(doc, stamped)
+            if t.HasStarted():
+                t.RollBack()
         except Exception:
             pass
-        if t.HasStarted():
-            t.RollBack()
-        raise
+        sys.stdout, sys.stderr = old_out, old_err
+        raise Exception(
+            "IFC export failed for '{}': {}".format(
+                export_name, exception_text(export_ex)
+            )
+        )
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+        try:
+            if t.HasStarted():
+                t.RollBack()
+        except Exception:
+            pass
 
     if not ok:
-        raise Exception("IFC export returned False for {}".format(base_name))
-    return _find_new_ifc(folder, before, base_name), filter_view
+        raise Exception("IFC export returned False for {}".format(export_name))
+    print("Uniqube: IFC exported as {}".format(export_name))
+    return _find_new_ifc(folder, before, export_name), filter_view
 
 
 def _resolve_link_path(host_doc, link_instance, link_doc):
@@ -413,7 +507,7 @@ def collect_export_targets(host_doc):
     Returns list of dicts for host + each loaded link.
     """
     targets = []
-    host_title = host_doc.Title or "Host"
+    host_title = as_unicode(host_doc.Title) or u"Host"
     targets.append(
         {
             "doc": host_doc,
@@ -429,7 +523,7 @@ def collect_export_targets(host_doc):
         link_doc = link.GetLinkDocument()
         if not link_doc:
             continue
-        title = link_doc.Title or link.Name or "Link"
+        title = as_unicode(link_doc.Title) or as_unicode(link.Name) or u"Link"
         targets.append(
             {
                 "doc": link_doc,
@@ -447,7 +541,7 @@ def export_targets_to_temp(targets, preferred_view=None, use_view_filter=True):
     Export each target to a temp folder.
     Host: export in-place with Transaction.
     When use_view_filter is True, IFC is filtered by preferred_view VV.
-    Links: copy RVT → open copy as primary → export (match view by name / 3D) → close.
+    Links: copy RVT -> open copy as primary -> export (match view by name / 3D) -> close.
     Returns (results, folder).
     """
     if not targets:
@@ -468,15 +562,21 @@ def export_targets_to_temp(targets, preferred_view=None, use_view_filter=True):
         )
 
     app = host_doc.Application
-    folder = tempfile.mkdtemp(prefix="uniqube_ifc_")
-    rvt_copy_dir = os.path.join(folder, "_rvt_copies")
-    os.makedirs(rvt_copy_dir)
-    results = []
+    folder = _net_temp_dir("uniqube_ifc_")
+    rvt_copy_dir = folder
+    try:
+        rvt_copy_dir = Path.Combine(folder, "_rvt")
+        Directory.CreateDirectory(rvt_copy_dir)
+    except Exception:
+        rvt_copy_dir = os.path.join(as_unicode(folder), "_rvt")
+        try:
+            os.makedirs(rvt_copy_dir)
+        except Exception:
+            rvt_copy_dir = folder
 
+    results = []
     for i, t in enumerate(targets):
-        base = "{}_{}".format(i, _safe_filename(t["title"]))
-        if t["category"] and t["category"] != "other":
-            base = "{}_{}".format(base, t["category"].upper())
+        base = "m{}_{}".format(i, as_ascii_name(t.get("category") or "model"))
 
         filter_view = None
         if t.get("is_host"):
@@ -515,7 +615,7 @@ def export_targets_to_temp(targets, preferred_view=None, use_view_filter=True):
                 "category": t["category"],
                 "title": t["title"],
                 "is_host": t["is_host"],
-                "filter_view_name": filter_view.Name if filter_view else None,
+                "filter_view_name": as_ascii_name(filter_view.Name, "view") if filter_view else None,
             }
         )
 

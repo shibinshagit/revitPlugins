@@ -8,10 +8,13 @@ from __future__ import print_function
 import os
 import shutil
 import tempfile
+import sys
 
 from pyrevit import revit, forms, script
+from uniqube_text import ascii_message, as_unicode, exception_text, safe_traceback
 
 logger = script.get_logger()
+PUBLISH_BUILD = "2026-08-17f"
 
 DISCIPLINE_OPTIONS = [
     "Architecture",
@@ -26,23 +29,113 @@ DISCIPLINE_TO_CATEGORY = {
 }
 
 
+def _alert(msg, title="Uniqube", yes=False):
+    """Show a dialog using ASCII-only text so IronPython never hits codec 'unknown'."""
+    text = ascii_message(msg)
+    dlg_title = ascii_message(title)
+    try:
+        from Autodesk.Revit.UI import TaskDialog, TaskDialogCommonButtons, TaskDialogResult
+        if yes:
+            result = TaskDialog.Show(
+                dlg_title,
+                text,
+                TaskDialogCommonButtons.Yes | TaskDialogCommonButtons.No,
+            )
+            return result == TaskDialogResult.Yes
+        TaskDialog.Show(dlg_title, text)
+        return True
+    except Exception:
+        try:
+            if yes:
+                return forms.alert(text, title=dlg_title, ok=False, yes=True, no=True)
+            forms.alert(text, title=dlg_title)
+            return True
+        except Exception:
+            try:
+                print(text)
+            except Exception:
+                pass
+            return not yes
+
+
 def _status(msg):
     """Write into the pyRevit output window so it is never a blank white pane."""
     try:
+        text = ascii_message(msg)
+    except Exception:
+        text = "status"
+    try:
+        print(text)
+    except Exception:
+        pass
+    try:
         script.get_output().print_html(
             "<div style='font-family:Consolas,monospace;margin:2px 0'>{}</div>".format(
-                str(msg).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             )
         )
     except Exception:
+        pass
+
+
+def _file_exists(path):
+    """os.path.isfile goes through IronPython codecs; .NET does not."""
+    try:
+        from System.IO import File as NetFile
+
+        return NetFile.Exists(path)
+    except Exception:
         try:
-            print(msg)
+            return os.path.isfile(path)
         except Exception:
-            pass
+            return False
+
+
+def _report_failure(ex, dialog_title):
+    """One place that turns any exception into visible, ASCII-only output."""
+    err = exception_text(ex)
+    tb = safe_traceback()
+    _status("ERROR: {}".format(err))
+    where = ""
+    if tb:
+        lines = [ln for ln in tb.splitlines() if ln.strip().startswith("File ")]
+        if lines:
+            where = lines[-1].strip()
+            _status("AT: {}".format(where))
+        for ln in tb.splitlines():
+            _status("TB: {}".format(ln))
+    detail = "Publish failed:\n\n{}".format(err)
+    if where:
+        detail += "\n\n{}".format(where)
+    detail += "\n\n(build {} - full traceback is in the output window)".format(
+        PUBLISH_BUILD
+    )
+    _alert(detail, title=dialog_title)
+    try:
+        sys.exc_clear()
+    except Exception:
+        pass
+
+
+def _log(msg):
+    """logger.info with ASCII only - Revit names can carry bytes IronPython
+    cannot push through the pyRevit log handler."""
+    try:
+        logger.info(ascii_message(msg))
+    except Exception:
+        pass
+
+
+def _warn(msg):
+    try:
+        logger.warning(ascii_message(msg))
+    except Exception:
+        pass
 
 
 def _pick_one(options, title, button_name="Continue"):
     """Reliable single-select (CommandSwitchWindow often returns None / blank UI)."""
+    _status("Waiting for dialog: {}".format(ascii_message(title)))
     return forms.SelectFromList.show(
         list(options),
         title=title,
@@ -168,13 +261,11 @@ def run_publish(target="local"):
     try:
         _run_publish_inner(t, dialog_title, progress_title, target_label)
     except Exception as ex:
-        logger.error(str(ex))
-        _status("ERROR: {}".format(ex))
-        forms.alert("Publish failed:\n\n{}".format(ex), title=dialog_title)
+        _report_failure(ex, dialog_title)
 
 
 def _run_publish_inner(t, dialog_title, progress_title, target_label):
-    _status("{} starting...".format(dialog_title))
+    _status("{} starting... build {}".format(dialog_title, PUBLISH_BUILD))
 
     doc = revit.doc
     if doc is None or doc.IsFamilyDocument:
@@ -292,7 +383,7 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
                     title=dialog_title,
                 )
         except Exception as verify_ex:
-            logger.warning("Project verify failed: {}".format(verify_ex))
+            _warn("Project verify failed: {}".format(exception_text(verify_ex)))
 
     # 2) New vs existing project
     project_id, existing_name, mode = _pick_publish_target(
@@ -301,7 +392,7 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
     if mode is None:
         return
 
-    project_name = doc.Title or "Revit Project"
+    project_name = as_unicode(doc.Title) or u"Revit Project"
     if mode == "new":
         name_in = forms.ask_for_string(
             default=project_name,
@@ -311,11 +402,11 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
         if not name_in:
             forms.alert("Publish cancelled (no project name).", title=dialog_title)
             return
-        project_name = name_in.strip()
+        project_name = as_unicode(name_in).strip()
         project_id = None
     else:
         # Existing / bound - keep name for job label
-        project_name = existing_name or project_name
+        project_name = as_unicode(existing_name) or project_name
 
     # Ask: exclude VV-hidden (default) vs publish full model
     EXCLUDE_VISIBLE = "Exclude hidden (only visible in active view)"
@@ -356,7 +447,7 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
             "IFC visibility: only elements visible in\n"
             "  '{}' ({})\n"
             "(VV / hide-element / view filters apply)\n\n"
-        ).format(filter_view.Name, filter_how)
+        ).format(ascii_message(filter_view.Name), ascii_message(filter_how))
     else:
         visibility_line = (
             "IFC visibility: FULL MODEL\n"
@@ -379,7 +470,7 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
     else:
         confirm += "Target: CREATE new Uniqube project \"{}\"\n".format(project_name)
 
-    if not forms.alert(confirm + "\nContinue?", title=dialog_title, ok=False, yes=True, no=True):
+    if not _alert(ascii_message(confirm) + "\nContinue?", title=dialog_title, yes=True):
         _status("Cancelled at confirm.")
         return
 
@@ -390,8 +481,9 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
             pb.update_progress(3, 100)
 
             pb.update_progress(5, 100)
+            _status("Stage 1/6: project browser snapshot")
             snapshot = uniqube_browser_snapshot.build_browser_snapshot(doc)
-            logger.info(
+            _log(
                 "Browser snapshot: {} views, {} sheets, {} schedules".format(
                     len(snapshot.get("views") or []),
                     len(snapshot.get("sheets") or []),
@@ -400,6 +492,7 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
             )
 
             pb.update_progress(10, 100)
+            _status("Stage 2/6: colour + BIMSF maps")
 
             import uniqube_color_export
             import uniqube_bimsf_export
@@ -409,18 +502,18 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
             bimsf_maps = []
             for tgt in targets:
                 src_doc = tgt.get("doc") or doc
-                title = tgt.get("title") or "model"
+                title = ascii_message(tgt.get("title") or "model")
                 try:
                     cmap = uniqube_color_export.build_color_map(src_doc)
                     color_maps.append(cmap)
-                    logger.info(
+                    _log(
                         "Color map for {}: {} coloured elements".format(
                             title,
                             cmap.get("count") or 0,
                         )
                     )
                 except Exception as cex:
-                    logger.warning("Color map failed for {}: {}".format(title, cex))
+                    _warn("Color map failed for {}: {}".format(title, exception_text(cex)))
                     color_maps.append({
                         "version": 1,
                         "count": 0,
@@ -432,7 +525,7 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
                 try:
                     bmap = uniqube_bimsf_export.build_bimsf_map(src_doc)
                     bimsf_maps.append(bmap)
-                    logger.info(
+                    _log(
                         "BIMSF map for {}: {} elements, {} panels".format(
                             title,
                             bmap.get("count") or 0,
@@ -440,7 +533,7 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
                         )
                     )
                 except Exception as bex:
-                    logger.warning("BIMSF map failed for {}: {}".format(title, bex))
+                    _warn("BIMSF map failed for {}: {}".format(title, exception_text(bex)))
                     bimsf_maps.append({
                         "version": 1,
                         "count": 0,
@@ -453,52 +546,55 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
                         "elements": [],
                     })
 
+            _status("Stage 3/6: IFC export")
             exports, folder = uniqube_ifc_export.export_targets_to_temp(
                 targets,
                 preferred_view=filter_view,
                 use_view_filter=use_view_filter,
             )
             for e in exports:
-                logger.info(
+                _log(
                     "IFC {} filter view: {}".format(
-                        e.get("title"),
-                        e.get("filter_view_name") or "(full model)",
+                        ascii_message(e.get("title")),
+                        ascii_message(e.get("filter_view_name") or "(full model)"),
                     )
                 )
             paths = [e["path"] for e in exports]
             categories = [e["category"] for e in exports]
             pb.update_progress(35, 100)
 
-            draw_folder = tempfile.mkdtemp(prefix="uniqube_draw_")
+            _status("Stage 4/6: CAD drawings")
+            draw_folder = uniqube_ifc_export._net_temp_dir("uniqube_draw_")
 
             def draw_progress(cur, total, message):
                 frac = float(cur) / float(max(total, 1))
                 pb.update_progress(int(35 + frac * 20), 100)
-                logger.info(message)
+                _log(message)
 
             manifest, draw_errors = uniqube_drawing_export.export_drawings(
                 doc, draw_folder, progress_cb=draw_progress
             )
             for err in draw_errors:
-                logger.warning(err)
-            logger.info("Exported {} CAD drawing(s)".format(len(manifest)))
+                _warn(err)
+            _status("Exported {} CAD drawing(s)".format(len(manifest)))
 
             drawing_files = []
             for i, m in enumerate(manifest):
-                if m.get("dxfPath") and os.path.isfile(m["dxfPath"]):
+                if m.get("dxfPath") and _file_exists(m["dxfPath"]):
                     drawing_files.append({
                         "field": "drawingDxf{}".format(i),
                         "path": m["dxfPath"],
-                        "filename": m.get("dxfFileName") or os.path.basename(m["dxfPath"]),
+                        "filename": m.get("dxfFileName"),
                     })
-                if m.get("dwgPath") and os.path.isfile(m["dwgPath"]):
+                if m.get("dwgPath") and _file_exists(m["dwgPath"]):
                     drawing_files.append({
                         "field": "drawingDwg{}".format(i),
                         "path": m["dwgPath"],
-                        "filename": m.get("dwgFileName") or os.path.basename(m["dwgPath"]),
+                        "filename": m.get("dwgFileName"),
                     })
 
             pb.update_progress(55, 100)
+            _status("Stage 5/6: uploading to {}".format(api_url))
 
             result = uniqube_client.publish_files(
                 api_url,
@@ -518,6 +614,7 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
                 raise Exception("No jobId returned: {}".format(result))
 
             pb.update_progress(65, 100)
+            _status("Stage 6/6: server job {} processing".format(job_id))
             status = uniqube_client.wait_for_job(api_url, token, job_id)
             pb.update_progress(95, 100)
 
@@ -576,16 +673,14 @@ def _run_publish_inner(t, dialog_title, progress_title, target_label):
             _status("Publish complete. Project id: {}".format(out_project_id))
 
     except Exception as ex:
-        logger.error(str(ex))
-        _status("ERROR: {}".format(ex))
-        forms.alert("Publish failed:\n\n{}".format(ex), title=dialog_title)
+        _report_failure(ex, dialog_title)
     finally:
         for d in (folder, draw_folder):
-            if d and os.path.isdir(d):
-                try:
-                    shutil.rmtree(d, ignore_errors=True)
-                except Exception:
-                    pass
+            try:
+                from uniqube_ifc_export import delete_temp_dir
+                delete_temp_dir(d)
+            except Exception:
+                pass
 
 
 def main():
