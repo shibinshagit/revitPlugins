@@ -1,0 +1,5 @@
+title: "Export\nMaps"
+tooltip: >-
+  Fast sidecar export: BIMSF_Container + colours as JSON. No IFC, no drawings,
+  no upload. Use when Publish is too slow. Send the JSON files to Uniqube.
+author: Uniqube
