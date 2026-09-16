@@ -362,22 +362,59 @@ def _pick_reference(members):
     return max(bottoms, key=lambda el: _curve_ends(el)[2])
 
 
-def _build_local_frame(members):
-    """Return (origin, ux, uy) with local X along the bottom track."""
+def _flange_width_mm(doc, element):
+    """Section flange width (bf): the bottom member's vertical extent."""
+    try:
+        et = doc.GetElement(element.GetTypeId())
+        if et is not None:
+            for name in ("bf", "b", "Flange Width", "Width"):
+                p = et.LookupParameter(name)
+                if p and p.HasValue and p.StorageType.ToString() == "Double":
+                    return p.AsDouble() * FT_TO_MM
+    except Exception:
+        pass
+    return 0.0
+
+
+def _base_elevation_mm(doc, element):
+    """World Z of the underside of the bottom track / chord.
+
+    The bottom member lies web-down, so its centreline sits half a flange
+    above the underside of the unit. Measuring heights from there keeps the
+    output identical for a panel or truss whatever floor it sits on.
+    """
+    p0, p1, _ = _curve_ends(element)
+    centre_z = min(p0.Z, p1.Z) * FT_TO_MM
+    return centre_z - 0.5 * _flange_width_mm(doc, element)
+
+
+def _build_local_frame(doc, members):
+    """Return (origin, ux, uy, z0) for the panel-local frame.
+
+    X runs along the bottom track from one end. Y is height above the level
+    the unit is hosted on rather than project elevation, so a panel on an
+    upper floor exports the same coordinates as the identical one at Z=0.
+    """
     ref = _pick_reference(members)
     if ref is None:
         raise ValueError("no bottom track / chord to define the panel frame")
     p0, p1, _ = _curve_ends(ref)
+
+    z0 = _base_elevation_mm(doc, ref)
+
     vx, vy = p1.X - p0.X, p1.Y - p0.Y
     horiz = math.sqrt(vx * vx + vy * vy)
     if horiz < 1e-9:
-        return (p0.X, p0.Y), 1.0, 0.0
-    return (p0.X, p0.Y), vx / horiz, vy / horiz
+        return (p0.X, p0.Y), 1.0, 0.0, z0
+    return (p0.X, p0.Y), vx / horiz, vy / horiz, z0
 
 
-def _to_local(origin, ux, uy, pt):
+def _to_local(origin, ux, uy, z0, pt):
     ox, oy = origin
-    return ((pt.X - ox) * ux + (pt.Y - oy) * uy) * FT_TO_MM, pt.Z * FT_TO_MM
+    return (
+        ((pt.X - ox) * ux + (pt.Y - oy) * uy) * FT_TO_MM,
+        pt.Z * FT_TO_MM - z0,
+    )
 
 
 def _vector_to_local(ux, uy, vec):
@@ -419,13 +456,13 @@ def build_member_records(doc, members):
     """Local-frame member dicts with roles, geometry and orientation."""
     if not members:
         return []
-    origin, ux, uy = _build_local_frame(members)
+    origin, ux, uy, z0 = _build_local_frame(doc, members)
 
     records = []
     for el in members:
         p0, p1, _length_ft = _curve_ends(el)
-        lx0, ly0 = _to_local(origin, ux, uy, p0)
-        lx1, ly1 = _to_local(origin, ux, uy, p1)
+        lx0, ly0 = _to_local(origin, ux, uy, z0, p0)
+        lx1, ly1 = _to_local(origin, ux, uy, z0, p1)
         role = _role_of(el)
         is_vertical = abs(ly1 - ly0) > abs(lx1 - lx0)
         lx0, ly0, lx1, ly1 = _normalize_ends(role, lx0, ly0, lx1, ly1)
