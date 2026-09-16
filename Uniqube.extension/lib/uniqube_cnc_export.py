@@ -1,19 +1,27 @@
 # -*- coding: utf-8 -*-
-"""CFS CNC CSV export (rollformer COMPONENT format).
+"""CFS CNC CSV export (rollformer COMPONENT format, Vertex BD compatible).
 
-Supports:
-  - Floor trusses in Revit assemblies (Comments = TopChord / BottomChord)
-  - Wall panels grouped by BIMSF_Container (labels TTOP/TBOT/E/S/HB)
-
-Matches Example/FT-1_362S162-43(50)_Edited.csv:
+Reproduces the Vertex BD panel file format, e.g.
+Example/CNC/WP-70_362S162-43(33)_Edited.csv:
 
     DETAILS,,<job name>
-    COMPONENT,<id>,<section>,<role>,<orient>,<qty>,
+    COMPONENT,<label>,<section>,<role>,<NORMAL|INVERTED>,<qty>,
               <length>,<x0>,<y0>,<x1>,<y1>,<web_depth>,
-              <OP>,<pos>,...
+              <OP>,<station>,...
 
-Coordinates and lengths are millimetres. Local X runs along the bottom
-track/chord; local Y is height (world Z).
+Everything is millimetres in a panel-local 2D frame: X along the bottom
+track (0 at one end), Y = height.
+
+Role codes come from BIMSF_Description (TBOT, TTOP, EV, SV, HB, CR, ...);
+floor trusses fall back to Comments (BottomChord, TopChord, Web, Support).
+
+Tooling is derived from member-to-member crossings, not fixed guesses:
+  * DIMPLE on both members at every crossing (fastener position)
+  * SWAGE at SWAGE_END_OFFSET from each end of every non-track member
+  * Track  x vertical crossing  -> track gets LIP NOTCH
+  * EV     x horizontal infill  -> EV gets LIP NOTCH
+  * Stud   x horizontal infill  -> stud gets SWAGE, infill gets
+                                   WEB NOTCH + LIP NOTCH
 """
 
 from __future__ import print_function
@@ -22,32 +30,75 @@ import math
 import re
 from collections import defaultdict
 
-# --- tooling offsets (mm), reverse-engineered from the example CSV ----------
-SUPPORT_DIMPLE = 17.84
-SUPPORT_SWAGE = 27.30
-
-WEB_DIMPLE = 9.53
-WEB_SWAGE_A = 27.30
-WEB_SWAGE_B = 46.11
-
-CHORD_LIP_NEAR = 19.13
-CHORD_LIP_FAR = 36.58
-
 FT_TO_MM = 304.8
 _EPS = 1e-9
-_JOINT_TOL_MM = 3.0
 
-_ROLE_ORDER = {
-    "BottomChord": 0,
-    "TopChord": 1,
-    "Nogging": 2,
-    "Web": 3,
-    "Support": 4,
+# Fixed machine offsets calibrated against the working Vertex BD wall panel
+# (CNC/WP-70_362S162-43(33)_Edited.csv).
+SWAGE_END_OFFSET = 26.79
+
+# Floor-truss offsets, calibrated against the Vertex BD truss file
+# (Example/FT-1_362S162-43(50)_Edited.csv).
+TRUSS_SUPPORT_DIMPLE = 17.84
+TRUSS_SUPPORT_SWAGE = 27.30
+TRUSS_WEB_DIMPLE = 9.53
+TRUSS_WEB_SWAGE_A = 27.30
+TRUSS_WEB_SWAGE_B = 46.11
+TRUSS_CHORD_LIP_NEAR = 19.13
+TRUSS_CHORD_LIP_FAR = 36.58
+
+OP_END_TRUSS = "END_TRUSS"
+
+# Crossing detection tolerances (mm)
+_TOUCH_TOL_MM = 2.0
+_PARALLEL_TOL = 0.02
+
+OP_WEB_NOTCH = "WEB NOTCH"
+OP_LIP_NOTCH = "LIP NOTCH"
+OP_SWAGE = "SWAGE"
+OP_DIMPLE = "DIMPLE"
+
+# DIMPLE always last at a shared station; WEB NOTCH first.
+_OP_PRIORITY = {
+    OP_END_TRUSS: 0,
+    OP_WEB_NOTCH: 1,
+    OP_LIP_NOTCH: 2,
+    OP_SWAGE: 3,
+    OP_DIMPLE: 4,
 }
 
-_HORIZONTAL_ROLES = ("BottomChord", "TopChord", "Nogging")
+# Role classes -------------------------------------------------------------
+TRACK_ROLES = ("TBOT", "TTOP", "BottomChord", "TopChord")
+END_VERTICAL_ROLES = ("EV",)
+TRUSS_ROLES = ("BottomChord", "TopChord", "Web", "Support")
+TRUSS_CHORD_ROLES = ("BottomChord", "TopChord")
+# Roles that must never reach the machine.
+SKIP_ROLES = ("Locked Panel",)
+SKIP_TYPE_NAMES = ("LockedPanel",)
+
+# Output row order (mirrors Vertex BD): verticals, tracks, then infill.
+_ROLE_ORDER = [
+    "EV",
+    "SV",
+    "SW",
+    "CR",
+    "SD",
+    "TBOT",
+    "TTOP",
+    "HB",
+    "SBW",
+    "HDW",
+    "HDD",
+    "USER",
+    # floor-truss roles
+    "BottomChord",
+    "TopChord",
+    "Web",
+    "Support",
+]
 
 
+# --- parameter helpers ----------------------------------------------------
 def _param_string(element, name):
     try:
         p = element.LookupParameter(name)
@@ -85,17 +136,29 @@ def _excluded_from_cnc(element):
         return False
 
 
+_TYPE_NAME_CACHE = {}
+
+
 def _type_name(doc, element):
     try:
         from Autodesk.Revit.DB import BuiltInParameter
 
-        et = doc.GetElement(element.GetTypeId())
+        type_id = element.GetTypeId()
+        key = (doc.PathName, type_id.IntegerValue)
+        if key in _TYPE_NAME_CACHE:
+            return _TYPE_NAME_CACHE[key]
+
+        et = doc.GetElement(type_id)
         if et is None:
-            return ""
-        p = et.get_Parameter(BuiltInParameter.SYMBOL_NAME_PARAM)
-        if p and p.HasValue:
-            return (p.AsString() or "").strip()
-        return (getattr(et, "Name", None) or "").strip()
+            name = ""
+        else:
+            p = et.get_Parameter(BuiltInParameter.SYMBOL_NAME_PARAM)
+            if p and p.HasValue:
+                name = (p.AsString() or "").strip()
+            else:
+                name = (getattr(et, "Name", None) or "").strip()
+        _TYPE_NAME_CACHE[key] = name
+        return name
     except Exception:
         return ""
 
@@ -103,17 +166,14 @@ def _type_name(doc, element):
 def _web_depth_mm(doc, element):
     try:
         et = doc.GetElement(element.GetTypeId())
-        if et is None:
-            return 0.0
-        for name in ("d", "Height", "Depth", "Web Depth"):
-            p = et.LookupParameter(name)
-            if p and p.HasValue and p.StorageType.ToString() == "Double":
-                return round(p.AsDouble() * FT_TO_MM, 2)
-        tname = _type_name(doc, element)
-        m = re.match(r"(\d{3})", tname or "")
+        if et is not None:
+            for name in ("d", "Height", "Depth", "Web Depth"):
+                p = et.LookupParameter(name)
+                if p and p.HasValue and p.StorageType.ToString() == "Double":
+                    return p.AsDouble() * FT_TO_MM
+        m = re.match(r"(\d{3})", _type_name(doc, element) or "")
         if m:
-            hundredths = int(m.group(1))
-            return round(hundredths / 100.0 * 25.4, 2)
+            return int(m.group(1)) / 100.0 * 25.4
     except Exception:
         pass
     return 0.0
@@ -130,6 +190,7 @@ def _curve_ends(element):
 def _label_of(element):
     return (
         _param_string(element, "BIMSF_Label")
+        or _param_string(element, "Label")
         or _param_string(element, "BIMSF_ScheduleLabel")
         or _param_string(element, "Mark")
         or "M{}".format(element.Id.IntegerValue)
@@ -137,47 +198,43 @@ def _label_of(element):
 
 
 def _role_from_label(label):
-    """Infer CNC role from BIMSF_Label when Comments is empty."""
     text = (label or "").strip().upper()
     if not text:
         return ""
-    if text.startswith("TTOP") or text.startswith("TC"):
-        return "TopChord"
-    if text.startswith("TBOT") or text.startswith("BC"):
-        return "BottomChord"
-    if text.startswith("HB") or text.startswith("NG") or text.startswith("BR"):
-        return "Nogging"
-    if text.startswith("WB"):
-        # floor-truss webs vs wall labels — WB without digit pattern still Web
-        return "Web"
-    if text.startswith("E") or text.startswith("S") or text.startswith("ST"):
-        return "Support"
+    for prefix, role in (
+        ("TTOP", "TTOP"),
+        ("TBOT", "TBOT"),
+        ("TC", "TopChord"),
+        ("BC", "BottomChord"),
+        ("HB", "HB"),
+        ("WB", "Web"),
+        ("E", "EV"),
+        ("S", "SV"),
+        ("C", "CR"),
+    ):
+        if text.startswith(prefix):
+            return role
     return ""
 
 
 def _role_of(element):
-    """Comments first (truss), else label prefixes (wall panel)."""
-    comments = _param_string(element, "Comments") or ""
-    if comments in (
-        "TopChord",
-        "BottomChord",
-        "Web",
-        "Support",
-        "Nogging",
-    ):
+    """Role code: BIMSF_Description, else Tag, else Comments, else label."""
+    for name in ("BIMSF_Description", "Tag"):
+        value = _param_string(element, name)
+        if value:
+            return value
+    comments = _param_string(element, "Comments")
+    if comments:
         return comments
-    # map common aliases
-    low = comments.lower()
-    if low in ("top track", "toptrack", "top plate"):
-        return "TopChord"
-    if low in ("bottom track", "bottomtrack", "bottom plate", "sole plate"):
-        return "BottomChord"
-    if low in ("stud", "end stud", "king stud", "jack stud"):
-        return "Support"
-    if low in ("nogging", "noggin", "bridging", "blocking"):
-        return "Nogging"
-    inferred = _role_from_label(_label_of(element))
-    return inferred or comments
+    return _role_from_label(_label_of(element))
+
+
+def _is_track(role):
+    return role in TRACK_ROLES
+
+
+def _is_end_vertical(role):
+    return role in END_VERTICAL_ROLES
 
 
 def _is_structural_framing(element):
@@ -192,29 +249,50 @@ def _is_structural_framing(element):
         return False
 
 
-def _group_has_chords(members):
-    roles = set(_role_of(el) for el in members)
-    return "TopChord" in roles and "BottomChord" in roles
+def _exportable(doc, element):
+    if element is None or not _is_structural_framing(element):
+        return False
+    if _excluded_from_cnc(element) or not _curve_ends(element):
+        return False
+    role = _role_of(element)
+    if not role or role in SKIP_ROLES:
+        return False
+    if _type_name(doc, element) in SKIP_TYPE_NAMES:
+        return False
+    return True
 
 
-def _filter_framing(elements):
-    members = []
-    for el in elements:
-        if el is None or _excluded_from_cnc(el) or not _is_structural_framing(el):
+# --- unit collection ------------------------------------------------------
+def _has_reference_member(doc, members):
+    return any(_is_track(_role_of(el)) for el in members)
+
+
+def unit_names_for_elements(doc, elements):
+    """Panel / truss names the given elements belong to."""
+    names = set()
+    for el in elements or []:
+        if el is None:
             continue
-        if not _curve_ends(el):
-            continue
-        if not _role_of(el):
-            continue
-        members.append(el)
-    return members
+        try:
+            asm_id = el.AssemblyInstanceId
+            if asm_id is not None and asm_id.IntegerValue != -1:
+                asm = doc.GetElement(asm_id)
+                if asm is not None:
+                    names.add(asm.Name or asm.AssemblyTypeName)
+                    continue
+        except Exception:
+            pass
+        container = _param_string(el, "BIMSF_Container") or _param_string(
+            el, "MasterContainer"
+        )
+        if container:
+            names.add(container)
+    return names
 
 
 def collect_cnc_units(doc):
-    """Collect exportable units: assemblies and/or BIMSF_Container panels.
-
-    Returns list of dicts: {name, members, source}
-    """
+    """Collect exportable panels/trusses as [{name, members, source}]."""
+    _TYPE_NAME_CACHE.clear()
     from Autodesk.Revit.DB import (
         AssemblyInstance,
         BuiltInCategory,
@@ -222,201 +300,148 @@ def collect_cnc_units(doc):
     )
 
     units = []
-    seen_ids = set()
+    seen = set()
 
-    # 1) Floor-truss (or panel) assemblies
     for asm in FilteredElementCollector(doc).OfClass(AssemblyInstance):
-        raw = [doc.GetElement(eid) for eid in asm.GetMemberIds()]
-        members = _filter_framing(raw)
-        if not _group_has_chords(members):
+        members = [
+            el
+            for el in (doc.GetElement(eid) for eid in asm.GetMemberIds())
+            if _exportable(doc, el)
+        ]
+        if not _has_reference_member(doc, members):
             continue
-        name = asm.Name or asm.AssemblyTypeName or "Truss"
-        units.append({"name": name, "members": members, "source": "assembly"})
+        units.append(
+            {
+                "name": asm.Name or asm.AssemblyTypeName or "Assembly",
+                "members": members,
+                "source": "assembly",
+            }
+        )
         for el in members:
-            seen_ids.add(el.Id.IntegerValue)
+            seen.add(el.Id.IntegerValue)
 
-    # 2) Wall panels / trusses by BIMSF_Container (not already in an assembly unit)
     by_container = defaultdict(list)
-    framing = FilteredElementCollector(doc).OfCategory(
-        BuiltInCategory.OST_StructuralFraming
-    ).WhereElementIsNotElementType()
+    framing = (
+        FilteredElementCollector(doc)
+        .OfCategory(BuiltInCategory.OST_StructuralFraming)
+        .WhereElementIsNotElementType()
+    )
     for el in framing:
-        if el.Id.IntegerValue in seen_ids:
+        if el.Id.IntegerValue in seen or not _exportable(doc, el):
             continue
-        if _excluded_from_cnc(el) or not _curve_ends(el):
-            continue
-        container = _param_string(el, "BIMSF_Container")
-        if not container:
-            continue
-        if not _role_of(el):
-            continue
-        by_container[container].append(el)
+        container = _param_string(el, "BIMSF_Container") or _param_string(
+            el, "MasterContainer"
+        )
+        if container:
+            by_container[container].append(el)
 
-    for name, raw in sorted(by_container.items()):
-        members = _filter_framing(raw)
-        if not _group_has_chords(members):
+    for name, members in by_container.items():
+        if not _has_reference_member(doc, members):
             continue
-        units.append({"name": name, "members": members, "source": "container"})
+        units.append({"name": name, "members": members, "source": "panel"})
 
-    units.sort(key=lambda u: u["name"])
+    units.sort(key=lambda u: _natural_key(u["name"]))
     return units
 
 
-# Back-compat alias used by older button code
-def collect_truss_assemblies(doc):
-    """Legacy: return [(None, name)]-incompatible; use collect_cnc_units."""
-    return collect_cnc_units(doc)
+def _natural_key(text):
+    parts = re.split(r"(\d+)", str(text or ""))
+    return [int(p) if p.isdigit() else p.lower() for p in parts]
 
 
-def _pick_bottom(members):
-    for el in members:
-        if _role_of(el) == "BottomChord":
-            return el
-    best = None
-    best_len = -1.0
-    for el in members:
-        ends = _curve_ends(el)
-        if not ends:
-            continue
-        p0, p1, length = ends
-        # prefer near-horizontal
-        if abs(p1.Z - p0.Z) < 0.1 and length > best_len:
-            best_len = length
-            best = el
-    return best
+# --- local frame ----------------------------------------------------------
+def _pick_reference(members):
+    """Bottom track / bottom chord defines the local X axis."""
+    bottoms = [
+        el for el in members if _role_of(el) in ("TBOT", "BottomChord")
+    ]
+    if not bottoms:
+        bottoms = [el for el in members if _is_track(_role_of(el))]
+    if not bottoms:
+        return None
+    return max(bottoms, key=lambda el: _curve_ends(el)[2])
 
 
 def _build_local_frame(members):
-    """Return (origin_xyz as tuple, ux, uy) horizontal span basis in ft.
-
-    localX = dot(pt - origin, (ux,uy,0)) * mm
-    localY = pt.Z * mm
-    """
-    bc = _pick_bottom(members)
-    if bc is None:
-        raise ValueError("No bottom chord/track found for local frame")
-    p0, p1, _ = _curve_ends(bc)
-    vx = p1.X - p0.X
-    vy = p1.Y - p0.Y
+    """Return (origin, ux, uy) with local X along the bottom track."""
+    ref = _pick_reference(members)
+    if ref is None:
+        raise ValueError("no bottom track / chord to define the panel frame")
+    p0, p1, _ = _curve_ends(ref)
+    vx, vy = p1.X - p0.X, p1.Y - p0.Y
     horiz = math.sqrt(vx * vx + vy * vy)
     if horiz < 1e-9:
-        # vertical-only oddity — fall back to world X
-        ux, uy = 1.0, 0.0
-        origin = p0
-    else:
-        ux, uy = vx / horiz, vy / horiz
-        # Put local X = 0 at the end with smaller projection along span
-        # so the bottom runs 0 → +length after normalize.
-        t0 = p0.X * ux + p0.Y * uy
-        t1 = p1.X * ux + p1.Y * uy
-        origin = p0 if t0 <= t1 else p1
-    return (origin.X, origin.Y, origin.Z), ux, uy
+        return (p0.X, p0.Y), 1.0, 0.0
+    return (p0.X, p0.Y), vx / horiz, vy / horiz
 
 
 def _to_local(origin, ux, uy, pt):
-    ox, oy, _oz = origin
-    lx = ((pt.X - ox) * ux + (pt.Y - oy) * uy) * FT_TO_MM
-    ly = pt.Z * FT_TO_MM
-    return lx, ly
+    ox, oy = origin
+    return ((pt.X - ox) * ux + (pt.Y - oy) * uy) * FT_TO_MM, pt.Z * FT_TO_MM
 
 
-def _orient(role, rotation_rad, x0, y0, x1, y1):
-    """NORMAL / INVERTED from cross-section rotation + diagonal lean."""
-    rot = rotation_rad if rotation_rad is not None else 0.0
-    inverted = rot < -1e-6
-    dx = x1 - x0
-    dy = y1 - y0
-    is_diagonal = abs(dx) > 1.0 and abs(dy) > 1.0
-    if is_diagonal and role == "Web":
-        going_up = dy > 0
-        lean_dx = dx if going_up else -dx
-        inverted = lean_dx < 0
-    elif role in ("BottomChord", "TopChord", "Nogging", "Support"):
-        # ±180° and negative rotations → INVERTED
-        inverted = abs(rot) > math.radians(45) and rot < 0
-        # end studs often use 180° (pi) which is "inverted" facing
-        if abs(abs(rot) - math.pi) < 0.1:
-            inverted = True
-        elif abs(rot) < 0.1:
-            inverted = False
-    return "INVERTED" if inverted else "NORMAL"
+def _vector_to_local(ux, uy, vec):
+    return vec.X * ux + vec.Y * uy, vec.Z
 
 
-def _normalize_member_ends(role, x0, y0, x1, y1):
-    """Horizontals: low X at start. Verticals/webs: low Y at start."""
-    if role in _HORIZONTAL_ROLES:
+def _flange_direction(element):
+    """In-plane direction the C-section lips open toward (world vector)."""
+    try:
+        basis_y = element.GetTransform().BasisY
+    except Exception:
+        return None
+    # BIMSF-SSMA sections point BasisY at the back of the web, so the open
+    # side faces the opposite way.
+    return -basis_y.X, -basis_y.Y, -basis_y.Z
+
+
+def _orientation_sign(direction_2d, flange_2d):
+    """2D cross product: >0 is NORMAL, <0 is INVERTED (before calibration)."""
+    ax, ay = direction_2d
+    fx, fy = flange_2d
+    return ax * fy - ay * fx
+
+
+def _normalize_ends(role, x0, y0, x1, y1):
+    """Tracks and chords run left to right; everything else bottom to top.
+
+    Matches how Vertex BD lists endpoints, including sloped truss webs.
+    """
+    if _is_track(role) or abs(y1 - y0) < 1.0:
         if x0 > x1 + _EPS:
             return x1, y1, x0, y0
-        return x0, y0, x1, y1
-    if y0 > y1 + _EPS:
+    elif y0 > y1 + _EPS:
         return x1, y1, x0, y0
     return x0, y0, x1, y1
 
 
-def _seg_intersect(a0, a1, b0, b1):
-    """2D segment intersection. Returns (x, y) or None."""
-    x1, y1 = a0
-    x2, y2 = a1
-    x3, y3 = b0
-    x4, y4 = b1
-    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(den) < _EPS:
-        return None
-    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
-    u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / den
-    if -0.05 <= t <= 1.05 and -0.05 <= u <= 1.05:
-        return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
-    return None
-
-
-def _near_vertical_hit(horizontal, vertical):
-    """Hit between near-horizontal and near-vertical members by shared X."""
-    if abs(vertical["x0"] - vertical["x1"]) > _JOINT_TOL_MM:
-        return None
-    if abs(horizontal["y0"] - horizontal["y1"]) > _JOINT_TOL_MM:
-        return None
-    sx = 0.5 * (vertical["x0"] + vertical["x1"])
-    hy = 0.5 * (horizontal["y0"] + horizontal["y1"])
-    xmin = min(horizontal["x0"], horizontal["x1"]) - _JOINT_TOL_MM
-    xmax = max(horizontal["x0"], horizontal["x1"]) + _JOINT_TOL_MM
-    ymin = min(vertical["y0"], vertical["y1"]) - _JOINT_TOL_MM
-    ymax = max(vertical["y0"], vertical["y1"]) + _JOINT_TOL_MM
-    if xmin <= sx <= xmax and ymin <= hy <= ymax:
-        return (sx, hy)
-    return None
-
-
-def _station_along(x0, y0, x1, y1, px, py):
-    dx = x1 - x0
-    dy = y1 - y0
-    length = math.sqrt(dx * dx + dy * dy)
-    if length < _EPS:
-        return 0.0
-    t = ((px - x0) * dx + (py - y0) * dy) / (length * length)
-    t = max(0.0, min(1.0, t))
-    return t * length
-
-
-def _chord_span_for_web(web_rec):
-    xs = (web_rec["x0"], web_rec["x1"])
-    return min(xs), max(xs)
-
-
 def build_member_records(doc, members):
-    """Build local-frame member dicts for a unit's framing list."""
+    """Local-frame member dicts with roles, geometry and orientation."""
     if not members:
         return []
     origin, ux, uy = _build_local_frame(members)
+
     records = []
     for el in members:
-        ends = _curve_ends(el)
-        p0, p1, _length_ft = ends
+        p0, p1, _length_ft = _curve_ends(el)
         lx0, ly0 = _to_local(origin, ux, uy, p0)
         lx1, ly1 = _to_local(origin, ux, uy, p1)
         role = _role_of(el)
-        lx0, ly0, lx1, ly1 = _normalize_member_ends(role, lx0, ly0, lx1, ly1)
-        length_mm = math.sqrt((lx1 - lx0) ** 2 + (ly1 - ly0) ** 2)
-        rot = _param_double(el, "Cross-Section Rotation")
+        is_vertical = abs(ly1 - ly0) > abs(lx1 - lx0)
+        lx0, ly0, lx1, ly1 = _normalize_ends(role, lx0, ly0, lx1, ly1)
+        length = math.hypot(lx1 - lx0, ly1 - ly0)
+        if length < _EPS:
+            continue
+
+        direction = ((lx1 - lx0) / length, (ly1 - ly0) / length)
+        flange = _flange_direction(el)
+        sign = 0.0
+        if flange is not None:
+            fx, fy = flange[0] * ux + flange[1] * uy, flange[2]
+            norm = math.hypot(fx, fy)
+            if norm > 1e-6:
+                sign = _orientation_sign(direction, (fx / norm, fy / norm))
+
         records.append(
             {
                 "element": el,
@@ -424,204 +449,356 @@ def build_member_records(doc, members):
                 "label": _label_of(el),
                 "section": _type_name(doc, el),
                 "role": role,
-                "orient": _orient(role, rot, lx0, ly0, lx1, ly1),
                 "qty": 1,
-                "length": length_mm,
+                "length": length,
                 "x0": lx0,
                 "y0": ly0,
                 "x1": lx1,
                 "y1": ly1,
                 "depth": _web_depth_mm(doc, el),
+                "vertical": is_vertical,
+                "sign": sign,
                 "ops": [],
             }
         )
+
+    _apply_orientation(records)
     return records
 
 
-def _find_joints(records):
-    """Map member id → joint list for tooling."""
-    horizontals = [r for r in records if r["role"] in _HORIZONTAL_ROLES]
-    supports = [r for r in records if r["role"] == "Support"]
-    webs = [r for r in records if r["role"] == "Web"]
-    joints = {r["id"]: [] for r in records}
+def _apply_orientation(records):
+    """Bottom track is always NORMAL; everything else follows from it.
 
-    for horiz in horizontals:
-        a0 = (horiz["x0"], horiz["y0"])
-        a1 = (horiz["x1"], horiz["y1"])
-        for other in supports + webs:
-            b0 = (other["x0"], other["y0"])
-            b1 = (other["x1"], other["y1"])
-            hit = _seg_intersect(a0, a1, b0, b1)
-            if hit is None and other["role"] == "Support":
-                hit = _near_vertical_hit(horiz, other)
+    Keeps NORMAL/INVERTED independent of which way the reference curve
+    happens to run in Revit.
+    """
+    flip = False
+    for rec in records:
+        if rec["role"] in ("TBOT", "BottomChord") and rec["sign"] < 0:
+            flip = True
+            break
+    for rec in records:
+        sign = -rec["sign"] if flip else rec["sign"]
+        rec["orient"] = "NORMAL" if sign > 0 else "INVERTED"
+
+
+# --- crossings ------------------------------------------------------------
+def _segment_cross(rec_a, rec_b):
+    """Intersection point of two member centrelines, or None."""
+    x1, y1, x2, y2 = rec_a["x0"], rec_a["y0"], rec_a["x1"], rec_a["y1"]
+    x3, y3, x4, y4 = rec_b["x0"], rec_b["y0"], rec_b["x1"], rec_b["y1"]
+    dx1, dy1 = x2 - x1, y2 - y1
+    dx2, dy2 = x4 - x3, y4 - y3
+    len_a = math.hypot(dx1, dy1)
+    len_b = math.hypot(dx2, dy2)
+    if len_a < _EPS or len_b < _EPS:
+        return None
+    den = dx1 * dy2 - dy1 * dx2
+    # |den| / (len_a * len_b) is sin(angle): reject near-parallel members.
+    if abs(den) < _PARALLEL_TOL * len_a * len_b:
+        return None
+    qx, qy = x3 - x1, y3 - y1
+    t = (qx * dy2 - qy * dx2) / den
+    u = (qx * dy1 - qy * dx1) / den
+    pad_a = _TOUCH_TOL_MM / len_a
+    pad_b = _TOUCH_TOL_MM / len_b
+    if -pad_a <= t <= 1 + pad_a and -pad_b <= u <= 1 + pad_b:
+        return x1 + t * dx1, y1 + t * dy1
+    return None
+
+
+def _station(rec, px, py):
+    dx, dy = rec["x1"] - rec["x0"], rec["y1"] - rec["y0"]
+    length = math.hypot(dx, dy)
+    if length < _EPS:
+        return 0.0
+    t = ((px - rec["x0"]) * dx + (py - rec["y0"]) * dy) / (length * length)
+    return max(0.0, min(1.0, t)) * length
+
+
+def _end_tolerance(rec):
+    """A crossing this close to an end means the member butts in there."""
+    depth = rec.get("depth") or 0.0
+    return 0.5 * depth + 2.0 if depth else 50.0
+
+
+def _terminates_at(rec, station):
+    tol = _end_tolerance(rec)
+    return station <= tol or station >= rec["length"] - tol
+
+
+def _receiver_rank(rec):
+    """Lower wins when two members butt into each other at a corner."""
+    if _is_track(rec["role"]):
+        return 0
+    if _is_end_vertical(rec["role"]):
+        return 1
+    if rec["vertical"]:
+        return 2
+    return 3
+
+
+def find_crossings(records):
+    """Per-member crossing list with the joint type already resolved.
+
+    Each entry is {station, joint} where joint is one of:
+      receive - the other member butts into this one (lips notched here)
+      butt    - this member butts into the other one (no extra tooling)
+      cross   - both members run through the joint
+    """
+    crossings = dict((rec["id"], []) for rec in records)
+    for i, rec_a in enumerate(records):
+        for rec_b in records[i + 1 :]:
+            hit = _segment_cross(rec_a, rec_b)
             if hit is None:
                 continue
-            hx, hy = hit
-            h_station = _station_along(
-                horiz["x0"], horiz["y0"], horiz["x1"], horiz["y1"], hx, hy
+            px, py = hit
+            station_a = _station(rec_a, px, py)
+            station_b = _station(rec_b, px, py)
+            ends_a = _terminates_at(rec_a, station_a)
+            ends_b = _terminates_at(rec_b, station_b)
+
+            if ends_a and ends_b:
+                # Corner joint: the track (then the end stud) receives.
+                a_receives = _receiver_rank(rec_a) <= _receiver_rank(rec_b)
+                joint_a = "receive" if a_receives else "butt"
+                joint_b = "butt" if a_receives else "receive"
+            elif ends_a:
+                joint_a, joint_b = "butt", "receive"
+            elif ends_b:
+                joint_a, joint_b = "receive", "butt"
+            else:
+                joint_a = joint_b = "cross"
+
+            crossings[rec_a["id"]].append(
+                {"station": station_a, "joint": joint_a}
             )
-            lean_sign = 0
+            crossings[rec_b["id"]].append(
+                {"station": station_b, "joint": joint_b}
+            )
+    return crossings
+
+
+def is_truss_unit(records):
+    """Floor/roof trusses carry chord and web roles instead of track codes."""
+    return any(rec["role"] in TRUSS_ROLES for rec in records)
+
+
+def _truss_joints(records):
+    """Chord crossings with webs and supports, with the web lean direction."""
+    chords = [r for r in records if r["role"] in TRUSS_CHORD_ROLES]
+    others = [r for r in records if r["role"] in ("Web", "Support")]
+    joints = dict((rec["id"], []) for rec in records)
+    for chord in chords:
+        for other in others:
+            hit = _segment_cross(chord, other)
+            if hit is None:
+                continue
+            px, py = hit
+            lean = 0
             if other["role"] == "Web":
-                xmin, xmax = _chord_span_for_web(other)
-                mid = 0.5 * (xmin + xmax)
-                lean_sign = 1 if mid > hx else -1
-            joints[horiz["id"]].append(
+                mid_x = 0.5 * (other["x0"] + other["x1"])
+                lean = 1 if mid_x > px else -1
+            joints[chord["id"]].append(
                 {
+                    "station": _station(chord, px, py),
                     "kind": other["role"],
-                    "station": h_station,
-                    "lean_sign": lean_sign,
+                    "lean": lean,
                 }
             )
-            # studs get mid-height dimples at nogging crossings
-            if other["role"] == "Support" and horiz["role"] == "Nogging":
-                s_station = _station_along(
-                    other["x0"], other["y0"], other["x1"], other["y1"], hx, hy
-                )
-                joints[other["id"]].append(
-                    {
-                        "kind": "Nogging",
-                        "station": s_station,
-                        "lean_sign": 0,
-                    }
-                )
     return joints
 
 
-def build_operations(member, joints_for_member):
-    """Return sorted list of (op_name, station_mm) for one member."""
+def build_truss_operations(member, joints_for_member):
+    """Tooling for truss members (calibrated on the FT-1 Vertex BD file)."""
     role = member["role"]
-    L = member["length"]
+    length = member["length"]
     ops = []
 
     if role == "Support":
         ops.extend(
             [
-                ("DIMPLE", SUPPORT_DIMPLE),
-                ("SWAGE", SUPPORT_SWAGE),
-                ("SWAGE", L - SUPPORT_SWAGE),
-                ("DIMPLE", L - SUPPORT_DIMPLE),
+                (OP_DIMPLE, TRUSS_SUPPORT_DIMPLE),
+                (OP_SWAGE, TRUSS_SUPPORT_SWAGE),
+                (OP_SWAGE, length - TRUSS_SUPPORT_SWAGE),
+                (OP_DIMPLE, length - TRUSS_SUPPORT_DIMPLE),
             ]
         )
-        for j in joints_for_member:
-            if j["kind"] == "Nogging":
-                ops.append(("DIMPLE", j["station"]))
     elif role == "Web":
         ops.extend(
             [
-                ("END_TRUSS", 0.0),
-                ("DIMPLE", WEB_DIMPLE),
-                ("SWAGE", WEB_SWAGE_A),
-                ("SWAGE", WEB_SWAGE_B),
-                ("SWAGE", L - WEB_SWAGE_B),
-                ("SWAGE", L - WEB_SWAGE_A),
-                ("DIMPLE", L - WEB_DIMPLE),
-                ("END_TRUSS", L),
+                (OP_END_TRUSS, 0.0),
+                (OP_DIMPLE, TRUSS_WEB_DIMPLE),
+                (OP_SWAGE, TRUSS_WEB_SWAGE_A),
+                (OP_SWAGE, TRUSS_WEB_SWAGE_B),
+                (OP_SWAGE, length - TRUSS_WEB_SWAGE_B),
+                (OP_SWAGE, length - TRUSS_WEB_SWAGE_A),
+                (OP_DIMPLE, length - TRUSS_WEB_DIMPLE),
+                (OP_END_TRUSS, length),
             ]
         )
-    elif role in _HORIZONTAL_ROLES:
-        for j in joints_for_member:
-            s = j["station"]
-            if j["kind"] == "Support":
-                ops.append(("LIP NOTCH", s))
-                ops.append(("DIMPLE", s))
-            elif j["kind"] == "Web" and role in ("BottomChord", "TopChord"):
-                ops.append(("DIMPLE", s))
-                sign = j["lean_sign"] or 1
-                ops.append(("LIP NOTCH", s + sign * CHORD_LIP_NEAR))
-                ops.append(("LIP NOTCH", s + sign * CHORD_LIP_FAR))
+    elif role in TRUSS_CHORD_ROLES:
+        for joint in joints_for_member:
+            station = joint["station"]
+            if joint["kind"] == "Support":
+                ops.append((OP_LIP_NOTCH, station))
+                ops.append((OP_DIMPLE, station))
+            else:
+                lean = joint["lean"] or 1
+                ops.append((OP_DIMPLE, station))
+                ops.append((OP_LIP_NOTCH, station + lean * TRUSS_CHORD_LIP_NEAR))
+                ops.append((OP_LIP_NOTCH, station + lean * TRUSS_CHORD_LIP_FAR))
 
-    _op_pri = {"END_TRUSS": 0, "LIP NOTCH": 1, "DIMPLE": 2, "SWAGE": 3}
+    return _finish_operations(ops, length)
 
-    def _key(item):
-        name, pos = item
-        return (round(pos, 4), _op_pri.get(name, 9), name)
 
-    ops.sort(key=_key)
+def build_operations(member, crossings_for_member):
+    """Machine operations for one member, sorted along its length."""
+    length = member["length"]
+    ops = []
+
+    # Members that butt into others are swaged near both ends so the
+    # connection lies flat. Tracks run edge to edge and are not swaged.
+    if not _is_track(member["role"]) and length > 2 * SWAGE_END_OFFSET:
+        ops.append((OP_SWAGE, SWAGE_END_OFFSET))
+        ops.append((OP_SWAGE, length - SWAGE_END_OFFSET))
+
+    for crossing in crossings_for_member:
+        station = crossing["station"]
+        joint = crossing["joint"]
+
+        if joint == "receive":
+            # The other member lands here: notch the lips to seat it.
+            ops.append((OP_LIP_NOTCH, station))
+        elif joint == "cross":
+            # Both members run through: the horizontal is notched over the
+            # vertical, and the vertical is swaged flat underneath it.
+            if member["vertical"]:
+                ops.append((OP_SWAGE, station))
+            else:
+                ops.append((OP_WEB_NOTCH, station))
+                ops.append((OP_LIP_NOTCH, station))
+
+        ops.append((OP_DIMPLE, station))
+
+    return _finish_operations(ops, length)
+
+
+def _finish_operations(ops, length):
+    """Sort along the member, drop out-of-range and duplicate operations."""
+    ops.sort(key=lambda op: (round(op[1], 3), _OP_PRIORITY.get(op[0], 9)))
     cleaned = []
-    for name, pos in ops:
-        if pos < -0.5 or pos > L + 0.5:
+    for name, station in ops:
+        if station < -0.5 or station > length + 0.5:
             continue
-        cleaned.append((name, max(0.0, min(L, pos))))
+        clamped = max(0.0, min(length, station))
+        if cleaned and cleaned[-1][0] == name and abs(cleaned[-1][1] - clamped) < 0.01:
+            continue
+        cleaned.append((name, clamped))
     return cleaned
 
 
-def _round2(v):
-    return round(v + 1e-9, 2)
+# --- formatting -----------------------------------------------------------
+def format_number(value):
+    """Fixed 2 decimals, as written by Vertex BD (e.g. 914.40, 0.00)."""
+    text = "{:.2f}".format(round(value + 1e-9, 2))
+    return "0.00" if text == "-0.00" else text
 
 
-def format_component_row(rec):
-    parts = [
+def panel_prefix(unit_name):
+    """WP-70 -> W70 (Vertex BD component prefix). Other names pass through."""
+    compact = re.sub(r"[\s_-]+", "", str(unit_name or ""))
+    match = re.match(r"^([A-Za-z])P(\d+)$", compact)
+    if match:
+        return "{}{}".format(match.group(1), match.group(2))
+    return ""
+
+
+def component_label(prefix, label):
+    return "{}-{}".format(prefix, label) if prefix else label
+
+
+def component_fields(rec, prefix=""):
+    fields = [
         "COMPONENT",
-        rec["label"],
+        component_label(prefix, rec["label"]),
         rec["section"],
         rec["role"],
         rec["orient"],
         str(int(rec.get("qty", 1))),
-        "{:.2f}".format(_round2(rec["length"])),
-        "{:.2f}".format(_round2(rec["x0"])),
-        "{:.2f}".format(_round2(rec["y0"])),
-        "{:.2f}".format(_round2(rec["x1"])),
-        "{:.2f}".format(_round2(rec["y1"])),
-        "{:.2f}".format(_round2(rec["depth"])),
+        format_number(rec["length"]),
+        format_number(rec["x0"]),
+        format_number(rec["y0"]),
+        format_number(rec["x1"]),
+        format_number(rec["y1"]),
+        format_number(rec["depth"]),
     ]
-    for name, pos in rec.get("ops") or []:
-        parts.append(name)
-        parts.append("{:.2f}".format(_round2(pos)))
-    return ",".join(parts)
+    for name, station in rec.get("ops") or []:
+        fields.append(name)
+        fields.append(format_number(station))
+    return fields
 
 
-def format_csv(job_name, components):
-    lines = ["DETAILS,,{}".format(job_name or "MULK Test")]
+def _role_rank(role):
+    try:
+        return _ROLE_ORDER.index(role)
+    except ValueError:
+        return len(_ROLE_ORDER)
+
+
+def format_csv(job_name, records, prefix=""):
     ordered = sorted(
-        components,
-        key=lambda r: (
-            _ROLE_ORDER.get(r["role"], 99),
-            r.get("label", ""),
-        ),
+        records,
+        key=lambda r: (_role_rank(r["role"]), _natural_key(r["label"])),
     )
-    for rec in ordered:
-        lines.append(format_component_row(rec))
-    return "\n".join(lines) + "\n"
+    rows = [["DETAILS", "", job_name or ""]]
+    rows.extend(component_fields(rec, prefix) for rec in ordered)
+    return "\r\n".join(",".join(row) for row in rows) + "\r\n"
 
 
 def suggest_filename(unit_name, section):
-    base = (unit_name or "Panel").strip()
-    # FT-1-0 → FT-1 (truss assembly suffix); keep LB3 / LB4 as-is
+    base = str(unit_name or "Panel").strip()
     if re.match(r"^FT-", base, re.IGNORECASE):
         base = re.sub(r"-\d+$", "", base)
-    sec = (section or "section").strip()
+    section = str(section or "section").strip()
     for ch in '<>:"/\\|?*':
         base = base.replace(ch, "_")
-        sec = sec.replace(ch, "_")
-    return "{}_{}.csv".format(base, sec)
+        section = section.replace(ch, "_")
+    return "{}_{}.csv".format(base, section)
 
 
+# --- entry point ----------------------------------------------------------
 def export_unit(doc, unit, job_name=None):
-    """Return (filename, csv_text, component_count) for one CNC unit dict."""
-    members = unit.get("members") or []
-    records = build_member_records(doc, members)
+    """Return (filename, csv_text, component_count) for one panel/truss."""
+    records = build_member_records(doc, unit.get("members") or [])
     if not records:
-        raise ValueError("No exportable framing in {}".format(unit.get("name")))
-    joints = _find_joints(records)
-    for rec in records:
-        rec["ops"] = build_operations(rec, joints.get(rec["id"], []))
-    section = ""
-    for rec in records:
-        if rec["section"]:
-            section = rec["section"]
-            break
+        raise ValueError("no exportable framing in {}".format(unit.get("name")))
+
+    if is_truss_unit(records):
+        joints = _truss_joints(records)
+        for rec in records:
+            rec["ops"] = build_truss_operations(rec, joints.get(rec["id"], []))
+    else:
+        crossings = find_crossings(records)
+        for rec in records:
+            rec["ops"] = build_operations(rec, crossings.get(rec["id"], []))
+
+    section = next((r["section"] for r in records if r["section"]), "")
     name = unit.get("name") or "Panel"
-    fname = suggest_filename(name, section)
-    text = format_csv(job_name or "MULK Test", records)
-    return fname, text, len(records)
+    text = format_csv(job_name, records, prefix=panel_prefix(name))
+    return suggest_filename(name, section), text, len(records)
 
 
 def export_assembly(doc, assembly, job_name=None):
-    """Back-compat: export a Revit AssemblyInstance."""
-    raw = [doc.GetElement(eid) for eid in assembly.GetMemberIds()]
+    """Back-compat wrapper for a Revit AssemblyInstance."""
+    members = [
+        el
+        for el in (doc.GetElement(eid) for eid in assembly.GetMemberIds())
+        if _exportable(doc, el)
+    ]
     unit = {
-        "name": assembly.Name or assembly.AssemblyTypeName or "Truss",
-        "members": _filter_framing(raw),
+        "name": assembly.Name or assembly.AssemblyTypeName or "Assembly",
+        "members": members,
         "source": "assembly",
     }
     return export_unit(doc, unit, job_name=job_name)
