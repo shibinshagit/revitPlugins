@@ -742,17 +742,31 @@ def format_number(value):
     return "0.00" if text == "-0.00" else text
 
 
-def panel_prefix(unit_name):
-    """WP-70 -> W70 (Vertex BD component prefix). Other names pass through."""
+def panel_prefix(unit_name, is_truss=False):
+    """Component label prefix: WP-70 -> W70, LB-1 -> LB1.
+
+    Truss components are named on their own (BC1-2, WB3-5) and take no
+    prefix, the way Vertex BD writes them.
+    """
+    if is_truss:
+        return ""
     compact = re.sub(r"[\s_-]+", "", str(unit_name or ""))
+    if not compact:
+        return ""
+    # Vertex drops the P of a WP panel: WP-70 becomes W70.
     match = re.match(r"^([A-Za-z])P(\d+)$", compact)
     if match:
         return "{}{}".format(match.group(1), match.group(2))
-    return ""
+    return compact
 
 
 def component_label(prefix, label):
-    return "{}-{}".format(prefix, label) if prefix else label
+    if not prefix:
+        return label
+    # Some models already carry the panel name in BIMSF_Label.
+    if str(label).startswith(prefix + "-"):
+        return label
+    return "{}-{}".format(prefix, label)
 
 
 def component_fields(rec, prefix=""):
@@ -801,7 +815,8 @@ def suggest_filename(unit_name, section):
     for ch in '<>:"/\\|?*':
         base = base.replace(ch, "_")
         section = section.replace(ch, "_")
-    return "{}_{}.csv".format(base, section)
+    # The machine expects a trailing underscore before the extension.
+    return "{}_{}_.csv".format(base, section)
 
 
 # --- entry point ----------------------------------------------------------
@@ -811,7 +826,8 @@ def export_unit(doc, unit, job_name=None):
     if not records:
         raise ValueError("no exportable framing in {}".format(unit.get("name")))
 
-    if is_truss_unit(records):
+    truss = is_truss_unit(records)
+    if truss:
         joints = _truss_joints(records)
         for rec in records:
             rec["ops"] = build_truss_operations(rec, joints.get(rec["id"], []))
@@ -822,7 +838,7 @@ def export_unit(doc, unit, job_name=None):
 
     section = next((r["section"] for r in records if r["section"]), "")
     name = unit.get("name") or "Panel"
-    text = format_csv(job_name, records, prefix=panel_prefix(name))
+    text = format_csv(job_name, records, prefix=panel_prefix(name, truss))
     return suggest_filename(name, section), text, len(records)
 
 
