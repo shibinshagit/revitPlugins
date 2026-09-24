@@ -22,6 +22,10 @@ Tooling is derived from member-to-member crossings, not fixed guesses:
   * EV     x horizontal infill  -> EV gets LIP NOTCH
   * Stud   x horizontal infill  -> stud gets SWAGE, infill gets
                                    WEB NOTCH + LIP NOTCH
+
+Service openings cut in Revit (Structural Framing Opening) become:
+  * SERVICE HOLE on studs / noggins / any non-track member
+  * WEB HOLE on tracks (Vertex BD naming on bottom track)
 """
 
 from __future__ import print_function
@@ -57,6 +61,8 @@ OP_WEB_NOTCH = "WEB NOTCH"
 OP_LIP_NOTCH = "LIP NOTCH"
 OP_SWAGE = "SWAGE"
 OP_DIMPLE = "DIMPLE"
+OP_SERVICE_HOLE = "SERVICE HOLE"
+OP_WEB_HOLE = "WEB HOLE"
 
 # DIMPLE always last at a shared station; WEB NOTCH first.
 _OP_PRIORITY = {
@@ -64,6 +70,8 @@ _OP_PRIORITY = {
     OP_WEB_NOTCH: 1,
     OP_LIP_NOTCH: 2,
     OP_SWAGE: 3,
+    OP_SERVICE_HOLE: 3,
+    OP_WEB_HOLE: 3,
     OP_DIMPLE: 4,
 }
 
@@ -689,7 +697,7 @@ def build_truss_operations(member, joints_for_member):
     return _finish_operations(ops, length)
 
 
-def build_operations(member, crossings_for_member):
+def build_operations(member, crossings_for_member, openings_for_member=None):
     """Machine operations for one member, sorted along its length."""
     length = member["length"]
     ops = []
@@ -718,7 +726,63 @@ def build_operations(member, crossings_for_member):
 
         ops.append((OP_DIMPLE, station))
 
+    # Revit structural openings punched through the member web.
+    # Vertex BD writes SERVICE HOLE on studs/noggins and WEB HOLE on tracks.
+    hole_op = OP_WEB_HOLE if _is_track(member["role"]) else OP_SERVICE_HOLE
+    for station in openings_for_member or []:
+        ops.append((hole_op, station))
+
     return _finish_operations(ops, length)
+
+
+def find_openings(doc, records):
+    """Station of every structural opening along each member centreline.
+
+    Returns {member_id: [station_mm, ...]} for openings hosted on the
+    given framing. Stations are measured from the exported (x0, y0) end.
+    """
+    from Autodesk.Revit.DB import BuiltInCategory, FilteredElementCollector, XYZ
+
+    by_id = dict((rec["id"], rec) for rec in records)
+    if not by_id:
+        return {}
+
+    # World points of the exported local frame, so an opening centre can
+    # be projected onto the same 2D axes the member ends use.
+    members = [r["element"] for r in records]
+    origin, ux, uy, z0 = _build_local_frame(doc, members)
+
+    out = defaultdict(list)
+    openings = (
+        FilteredElementCollector(doc)
+        .OfCategory(BuiltInCategory.OST_StructuralFramingOpening)
+        .WhereElementIsNotElementType()
+    )
+    for opening in openings:
+        try:
+            host = opening.Host
+        except Exception:
+            host = None
+        if host is None or host.Id.IntegerValue not in by_id:
+            continue
+        bb = opening.get_BoundingBox(None)
+        if bb is None:
+            continue
+        mid = XYZ(
+            (bb.Min.X + bb.Max.X) * 0.5,
+            (bb.Min.Y + bb.Max.Y) * 0.5,
+            (bb.Min.Z + bb.Max.Z) * 0.5,
+        )
+        lx, ly = _to_local(origin, ux, uy, z0, mid)
+        rec = by_id[host.Id.IntegerValue]
+        station = _station(rec, lx, ly)
+        if station < -0.5 or station > rec["length"] + 0.5:
+            continue
+        out[rec["id"]].append(max(0.0, min(rec["length"], station)))
+
+    for stations in out.values():
+        stations.sort()
+    return out
 
 
 def _finish_operations(ops, length):
@@ -827,14 +891,22 @@ def export_unit(doc, unit, job_name=None):
         raise ValueError("no exportable framing in {}".format(unit.get("name")))
 
     truss = is_truss_unit(records)
+    openings = find_openings(doc, records)
     if truss:
         joints = _truss_joints(records)
         for rec in records:
-            rec["ops"] = build_truss_operations(rec, joints.get(rec["id"], []))
+            ops = build_truss_operations(rec, joints.get(rec["id"], []))
+            for station in openings.get(rec["id"], []):
+                ops.append((OP_SERVICE_HOLE, station))
+            rec["ops"] = _finish_operations(ops, rec["length"])
     else:
         crossings = find_crossings(records)
         for rec in records:
-            rec["ops"] = build_operations(rec, crossings.get(rec["id"], []))
+            rec["ops"] = build_operations(
+                rec,
+                crossings.get(rec["id"], []),
+                openings.get(rec["id"], []),
+            )
 
     section = next((r["section"] for r in records if r["section"]), "")
     name = unit.get("name") or "Panel"
