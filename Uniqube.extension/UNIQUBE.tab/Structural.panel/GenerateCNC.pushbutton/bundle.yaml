@@ -3,3 +3,7 @@ tooltip: >-
   Export CFS CNC CSV (COMPONENT + DIMPLE/SWAGE/LIP NOTCH/END_TRUSS) for floor
   trusses and wall panels (BIMSF_Container) — one file per unit.
 author: Uniqube
+# The window stays open beside Revit after the script has finished, so the
+# engine that runs it must stay alive too.
+engine:
+  persistent: true

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Hosts pyRevit's .NET 8 IronPython engine, the one Revit 2025+ uses,
+       so the Generate CNC window can be run without Revit. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>netcore_host</AssemblyName>
+    <RootNamespace>NetcoreHost</RootNamespace>
+  </PropertyGroup>
+
+</Project>

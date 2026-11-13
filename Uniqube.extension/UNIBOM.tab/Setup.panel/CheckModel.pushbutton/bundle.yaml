@@ -1,0 +1,7 @@
+title: Check Model
+tooltip: >-
+  Lists everything that would make the BOQ wrong: elements with no rule,
+  items missing from the item master, Revit profile weights that disagree
+  with the item master, framing outside a panel, walls not framed by BIMSF.
+  Read-only; changes nothing in the model.
+author: Uniqube

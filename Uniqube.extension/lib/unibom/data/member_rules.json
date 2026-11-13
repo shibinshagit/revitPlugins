@@ -1,0 +1,81 @@
+{
+  "_about": "Counted mode: how each modelled element becomes a BOQ line. Rules run in order; the first match wins. match keys are regular expressions on the record (category, family, type, role, container). item, name and role are templates (role defaults to {role}): {family} {type} {section} {thickness_mm} {role}. qty maps a unit to a formula over the record (length_m, width_mm, height_mm, area_m2, sheet_area_m2, kg_per_m, ...). group sets the BOQ section for items not in items.json. library: true means the item must exist in items.json.",
+  "version": 1,
+  "rules": [
+    {
+      "id": "IGNORE-HELPERS",
+      "match": { "family": "^(PanelLocator|MLPanelInstance|PanelLabel|LinearSheathingVoid|mwfBenchmark|PanelParams|TrussLabel|LocatorCube)$" },
+      "ignore": true
+    },
+    {
+      "id": "SHEATHING",
+      "match": { "category": "^Structural Framing$", "family": "^SheathingPanel$" },
+      "item": "BOARD-{thickness_mm}",
+      "role": "{layer}",
+      "library": true,
+      "qty": { "m2": "sheet_area_m2", "nr": "1" }
+    },
+    {
+      "id": "STRAP",
+      "match": { "category": "^Structural Framing$", "family": "FlatStrap" },
+      "item": "STRAP-{type}",
+      "library": true,
+      "qty": { "m": "length_m", "kg": "length_m * kg_per_m", "nr": "1" }
+    },
+    {
+      "id": "LGS-PROFILE",
+      "match": { "category": "^Structural Framing$", "family": "^BIMSF-SSMA" },
+      "item": "LGS-{section}",
+      "library": true,
+      "qty": { "m": "length_m", "kg": "length_m * kg_per_m", "nr": "1" }
+    },
+    {
+      "id": "ANCHOR",
+      "group": "Fixings",
+      "match": { "category": "^Structural Connections$", "family": "(?i)anchor" },
+      "item": "ANCHOR-{type}",
+      "name": "Anchor bolt {type}",
+      "qty": { "nr": "1" }
+    },
+    {
+      "id": "CONNECTOR",
+      "group": "Fixings",
+      "match": { "category": "^Structural Connections$" },
+      "item": "CONN-{family}",
+      "name": "Connector {family} {type}",
+      "qty": { "nr": "1" }
+    },
+    {
+      "id": "WINDOW",
+      "group": "Openings",
+      "match": { "category": "^Windows$" },
+      "item": "WIN-{family}-{type}",
+      "name": "{family} {type}",
+      "qty": { "nr": "1", "m2": "width_mm * height_mm / 1000000" }
+    },
+    {
+      "id": "DOOR",
+      "group": "Openings",
+      "match": { "category": "^Doors$" },
+      "item": "DOOR-{family}-{type}",
+      "name": "{family} {type}",
+      "qty": { "nr": "1", "m2": "width_mm * height_mm / 1000000" }
+    },
+    {
+      "id": "ROOF",
+      "group": "Roofing",
+      "match": { "category": "^Roofs$" },
+      "item": "ROOF-{type}",
+      "name": "Roof {type}",
+      "qty": { "m2": "area_m2" }
+    },
+    {
+      "id": "GUTTER",
+      "group": "Roofing",
+      "match": { "category": "^Casework$", "family": "(?i)gutter" },
+      "item": "GUTTER-{type}",
+      "name": "Gutter {type}",
+      "qty": { "nr": "1", "m": "length_m" }
+    }
+  ]
+}

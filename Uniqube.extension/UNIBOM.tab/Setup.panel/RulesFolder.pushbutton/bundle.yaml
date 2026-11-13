@@ -1,0 +1,6 @@
+title: Rules
+tooltip: >-
+  Opens the UNIBOM data folder: settings.json, items.json (item master),
+  member_rules.json (counted mode) and wall_recipes.json (recipe mode).
+  Edit, save, then run Check Model again.
+author: Uniqube

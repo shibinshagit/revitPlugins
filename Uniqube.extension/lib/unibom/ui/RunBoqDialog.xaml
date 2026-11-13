@@ -1,0 +1,375 @@
+<Window
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="UNIBOM - Run BOQ"
+    Width="620"
+    SizeToContent="Height"
+    WindowStartupLocation="CenterScreen"
+    ResizeMode="NoResize"
+    WindowStyle="None"
+    AllowsTransparency="True"
+    Background="Transparent"
+    ShowInTaskbar="False"
+    FontFamily="Segoe UI"
+    FontSize="13"
+    UseLayoutRounding="True"
+    TextOptions.TextFormattingMode="Display">
+
+    <Window.Resources>
+        <!-- UNIBOM dark / orange palette -->
+        <SolidColorBrush x:Key="Bg" Color="#FF16171B"/>
+        <SolidColorBrush x:Key="Surface" Color="#FF1E2025"/>
+        <SolidColorBrush x:Key="Card" Color="#FF25282F"/>
+        <SolidColorBrush x:Key="CardHover" Color="#FF2C3038"/>
+        <SolidColorBrush x:Key="CardChecked" Color="#FF2E2720"/>
+        <SolidColorBrush x:Key="Line" Color="#FF363A45"/>
+        <SolidColorBrush x:Key="Text" Color="#FFEEF0F3"/>
+        <SolidColorBrush x:Key="Muted" Color="#FF9AA1AD"/>
+        <SolidColorBrush x:Key="Accent" Color="#FFF7902C"/>
+        <SolidColorBrush x:Key="AccentHover" Color="#FFFFA94D"/>
+        <SolidColorBrush x:Key="AccentPressed" Color="#FFD97B0C"/>
+        <SolidColorBrush x:Key="Navy" Color="#FF03061E"/>
+        <SolidColorBrush x:Key="OnAccent" Color="#FF16171B"/>
+
+        <Style x:Key="SectionLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource Accent}"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Margin" Value="2,18,0,8"/>
+        </Style>
+
+        <Style x:Key="CardTitle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <Style x:Key="CardText" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Margin" Value="0,4,0,0"/>
+        </Style>
+
+        <!-- Selectable option card -->
+        <Style x:Key="OptionCard" TargetType="RadioButton">
+            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="Bd"
+                                Background="{StaticResource Card}"
+                                BorderBrush="{StaticResource Line}"
+                                BorderThickness="1.5"
+                                CornerRadius="10"
+                                Padding="14,12,14,14"
+                                MinHeight="104">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <ContentPresenter Grid.Column="0" VerticalAlignment="Top"/>
+                                <Grid Grid.Column="1" Width="18" Height="18"
+                                      VerticalAlignment="Top" Margin="8,0,0,0">
+                                    <Ellipse x:Name="Ring" Stroke="{StaticResource Muted}"
+                                             StrokeThickness="1.5"/>
+                                    <Ellipse x:Name="Dot" Width="8" Height="8"
+                                             Fill="{StaticResource OnAccent}" Visibility="Collapsed"/>
+                                </Grid>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource CardHover}"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource CardChecked}"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                <Setter TargetName="Ring" Property="Fill" Value="{StaticResource Accent}"/>
+                                <Setter TargetName="Ring" Property="Stroke" Value="{StaticResource Accent}"/>
+                                <Setter TargetName="Dot" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Bd" Property="Opacity" Value="0.38"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Check box -->
+        <Style x:Key="DarkCheck" TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="0,0,24,0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <Border x:Name="Box" Width="18" Height="18" CornerRadius="4"
+                                    BorderThickness="1.5" BorderBrush="{StaticResource Muted}"
+                                    Background="Transparent" VerticalAlignment="Center">
+                                <Path x:Name="Tick" Data="M 3.5 9 L 7.5 13 L 14.5 5"
+                                      Stroke="{StaticResource OnAccent}" StrokeThickness="2.2"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      Visibility="Collapsed"/>
+                            </Border>
+                            <ContentPresenter Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Box" Property="Background" Value="{StaticResource Accent}"/>
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                <Setter TargetName="Tick" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Box" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Buttons -->
+        <Style x:Key="PrimaryButton" TargetType="Button">
+            <Setter Property="Foreground" Value="{StaticResource OnAccent}"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{StaticResource Accent}"
+                                CornerRadius="8" Padding="22,9">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentHover}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentPressed}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="GhostButton" TargetType="Button">
+            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="Transparent"
+                                BorderBrush="{StaticResource Line}" BorderThickness="1"
+                                CornerRadius="8" Padding="16,8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource Card}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CloseButton" TargetType="Button">
+            <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="Transparent" CornerRadius="6"
+                                Width="30" Height="30">
+                            <Path Data="M 0 0 L 10 10 M 10 0 L 0 10" Stroke="{TemplateBinding Foreground}"
+                                  StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource Card}"/>
+                                <Setter Property="Foreground" Value="{StaticResource Text}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border Background="{StaticResource Bg}" BorderBrush="{StaticResource Line}"
+            BorderThickness="1" CornerRadius="14">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header -->
+            <Border x:Name="HeaderBar" Grid.Row="0" Background="{StaticResource Surface}"
+                    CornerRadius="14,14,0,0" Padding="22,14,14,14">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Image x:Name="BrandLogo" Grid.Column="0" Height="40" MaxWidth="120"
+                           Stretch="Uniform" VerticalAlignment="Center"
+                           SnapsToDevicePixels="True"
+                           RenderOptions.BitmapScalingMode="HighQuality"/>
+                    <Rectangle Grid.Column="1" Width="1" Height="28" Fill="{StaticResource Line}"
+                               Margin="16,0" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                        <TextBlock Text="Run BOQ" Foreground="{StaticResource Text}"
+                                   FontSize="17" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="model_text" Text="Model" Foreground="{StaticResource Muted}"
+                                   FontSize="12" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                    <Button x:Name="cancel_button" Grid.Column="3" Style="{StaticResource CloseButton}"
+                            VerticalAlignment="Top" ToolTip="Close"/>
+                </Grid>
+            </Border>
+            <Rectangle Grid.Row="1" Height="2" Fill="{StaticResource Accent}"/>
+
+            <Border x:Name="ModelBar" Grid.Row="2" Background="#FFFFF4D6" BorderBrush="#FFF0D48A"
+                    BorderThickness="0,0,0,1" Padding="22,8" Visibility="Collapsed">
+                <TextBlock x:Name="ModelBarText" Foreground="#FF8A4B08" FontWeight="SemiBold"
+                           TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
+            </Border>
+
+            <!-- Body -->
+            <StackPanel Grid.Row="3" Margin="22,4,22,22">
+                <TextBlock Text="SCOPE" Style="{StaticResource SectionLabel}"/>
+                <UniformGrid Columns="3" Margin="0,0,-10,0">
+                    <RadioButton x:Name="rb_model" GroupName="scope" Style="{StaticResource OptionCard}" IsChecked="True">
+                        <StackPanel>
+                            <TextBlock Text="Whole model" Style="{StaticResource CardTitle}"/>
+                            <TextBlock Text="Every panel, truss, board, fixing and opening." Style="{StaticResource CardText}"/>
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="rb_view" GroupName="scope" Style="{StaticResource OptionCard}">
+                        <StackPanel>
+                            <TextBlock Text="Active view" Style="{StaticResource CardTitle}"/>
+                            <TextBlock x:Name="view_text" Text="Only what the active view shows." Style="{StaticResource CardText}"/>
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="rb_selection" GroupName="scope" Style="{StaticResource OptionCard}">
+                        <StackPanel>
+                            <TextBlock Text="Selection" Style="{StaticResource CardTitle}"/>
+                            <TextBlock x:Name="selection_text" Text="Nothing selected." Style="{StaticResource CardText}"/>
+                        </StackPanel>
+                    </RadioButton>
+                </UniformGrid>
+
+                <TextBlock Text="METHOD" Style="{StaticResource SectionLabel}"/>
+                <UniformGrid Columns="3" Margin="0,0,-10,0">
+                    <RadioButton x:Name="rb_counted" GroupName="method" Style="{StaticResource OptionCard}" IsChecked="True">
+                        <StackPanel>
+                            <TextBlock Text="Counted" Style="{StaticResource CardTitle}"/>
+                            <TextBlock Text="Sums the parts BIMSF modelled. Most accurate." Style="{StaticResource CardText}"/>
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="rb_recipe" GroupName="method" Style="{StaticResource OptionCard}">
+                        <StackPanel>
+                            <TextBlock Text="Recipe estimate" Style="{StaticResource CardTitle}"/>
+                            <TextBlock Text="Wall framing from the spec formulas. For early estimates." Style="{StaticResource CardText}"/>
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="rb_both" GroupName="method" Style="{StaticResource OptionCard}">
+                        <StackPanel>
+                            <TextBlock Text="Both, compared" Style="{StaticResource CardTitle}"/>
+                            <TextBlock Text="Runs both and shows how far the recipe lands." Style="{StaticResource CardText}"/>
+                        </StackPanel>
+                    </RadioButton>
+                </UniformGrid>
+
+                <TextBlock Text="OUTPUT" Style="{StaticResource SectionLabel}"/>
+                <Border Background="{StaticResource Card}" BorderBrush="{StaticResource Line}"
+                        BorderThickness="1" CornerRadius="10" Padding="16,14">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <CheckBox x:Name="cb_csv" Content="CSV for Excel" IsChecked="True" Style="{StaticResource DarkCheck}"/>
+                            <CheckBox x:Name="cb_html" Content="HTML report" IsChecked="True" Style="{StaticResource DarkCheck}"/>
+                        </StackPanel>
+                        <Grid Margin="0,14,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0" Background="{StaticResource Bg}" BorderBrush="{StaticResource Line}"
+                                    BorderThickness="1" CornerRadius="6" Padding="10,7">
+                                <TextBlock x:Name="folder_text" Foreground="{StaticResource Muted}" FontSize="12"
+                                           TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                            </Border>
+                            <Button x:Name="folder_button" Grid.Column="1" Content="Change..."
+                                    Margin="10,0,0,0" Style="{StaticResource GhostButton}"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <!-- Footer -->
+            <Border Grid.Row="4" Background="{StaticResource Surface}" CornerRadius="0,0,14,14"
+                    Padding="22,14">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse Width="7" Height="7" Fill="#FF3DBE8B" VerticalAlignment="Center"/>
+                            <TextBlock Text="Read-only. The model is not changed."
+                                       Foreground="{StaticResource Muted}"
+                                       FontSize="12" Margin="8,0,0,0"/>
+                        </StackPanel>
+                        <TextBlock x:Name="status_text" Foreground="{StaticResource Muted}"
+                                   FontSize="12" Margin="0,6,0,0" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                    <Button x:Name="run_button" Grid.Column="1" Content="Run takeoff"
+                            Style="{StaticResource PrimaryButton}" IsDefault="True"/>
+                </Grid>
+            </Border>
+
+            <Grid x:Name="ReportOverlay" Grid.Row="0" Grid.RowSpan="5" Background="#8C111827"
+                  Visibility="Collapsed">
+                <Border Background="{StaticResource Card}" CornerRadius="12" Width="480"
+                        HorizontalAlignment="Center" VerticalAlignment="Center" Padding="22,18">
+                    <DockPanel>
+                        <StackPanel DockPanel.Dock="Top">
+                            <StackPanel Orientation="Horizontal">
+                                <Ellipse x:Name="ReportDot" Width="11" Height="11" Fill="#FF15803D"
+                                         VerticalAlignment="Center" Margin="0,1,10,0"/>
+                                <TextBlock x:Name="ReportTitle" FontSize="16" FontWeight="SemiBold"
+                                           Foreground="{StaticResource Text}"/>
+                            </StackPanel>
+                            <TextBlock x:Name="ReportSummary" Margin="0,10,0,0" TextWrapping="Wrap"
+                                       Foreground="{StaticResource Text}" LineHeight="19"/>
+                        </StackPanel>
+                        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal"
+                                    HorizontalAlignment="Right" Margin="0,18,0,0">
+                            <Button x:Name="ReportOpenButton" Content="Open folder"
+                                    Style="{StaticResource GhostButton}" Margin="0,0,8,0"/>
+                            <Button x:Name="ReportCloseButton" Content="Done"
+                                    Style="{StaticResource PrimaryButton}"/>
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>

@@ -1,0 +1,49 @@
+{
+  "_about": "UNIBOM project settings. Values copied from UNIQUBE Estimation Engine - Superstructure Logic v1.0 (superstructureRules.json, 2026-10-26). source: UNIQUBE = decided, PROPOSED = default to confirm, SUPPLIER = supplier data.",
+  "version": 1,
+  "parameters": {
+    "stud_spacing_mm": { "value": 600, "source": "UNIQUBE", "note": "Spec allows 450 or 600. Walls framed by BIMSF use their own ss_StudSpacing." },
+    "panel_max_length_mm": { "value": 2400, "source": "UNIQUBE" },
+    "panel_max_height_mm": { "value": 12000, "source": "UNIQUBE" },
+    "nogging_spacing_mm": { "value": 1200, "source": "UNIQUBE" },
+    "jamb_studs_per_side": { "value": 2, "source": "UNIQUBE" },
+    "lgs_wastage": { "value": 0.05, "source": "UNIQUBE" },
+    "screws_per_kg": { "value": 7, "source": "UNIQUBE", "note": "screws per kg net LGS" },
+    "board_wastage": { "value": 0.10, "source": "PROPOSED", "note": "Not in the spec. Confirm with estimation." },
+    "kg_per_m_tolerance": { "value": 0.02, "source": "PROPOSED", "note": "Check Model flags Revit type weights further than this from the item library." }
+  },
+  "systems": [
+    { "match": "^TRUSS", "name": "Roof trusses" },
+    { "match": "^PURLIN", "name": "Purlins" },
+    { "match": "^E", "name": "External wall panels" },
+    { "match": "^I", "name": "Internal wall panels" },
+    { "match": "^WB-", "name": "WB panels" },
+    { "match": "^BLOCKING", "name": "Blocking" },
+    { "match": "^F", "name": "Floor panels" }
+  ],
+  "unassigned_system": "Not in a panel",
+  "roles": {
+    "SV": "Stud",
+    "EV": "End stud",
+    "TTOP": "Top track",
+    "TBOT": "Bottom track",
+    "HB": "Horizontal / nogging",
+    "CR": "Cripple",
+    "SD": "Door jamb stud",
+    "SW": "Window jamb stud",
+    "HDD": "Door header",
+    "HDW": "Window header",
+    "SBW": "Window sill",
+    "BRR": "Bracing",
+    "CB": "Cross brace strap",
+    "TopChord": "Truss top chord",
+    "BottomChord": "Truss bottom chord",
+    "Web": "Truss web",
+    "Support": "Truss support",
+    "Slider": "Truss slider",
+    "TRACK": "Track (recipe)",
+    "Ext-1": "Board, external face layer 1",
+    "Int-1": "Board, internal face layer 1",
+    "Int-2": "Board, internal face layer 2"
+  }
+}

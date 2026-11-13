@@ -1,0 +1,12 @@
+title: Run BOQ
+tooltip: >-
+  Takes off the BOQ from the whole model, the active view or the current
+  selection (a selected wall brings its whole BIMSF panel). Counted mode
+  sums the modelled framing, boards, connectors, windows, doors and roofs;
+  recipe mode estimates wall framing from the spec formulas. Writes a CSV
+  to Documents/UNIBOM. Read-only. Stays open beside Revit.
+author: Uniqube
+# The window stays open beside Revit after the script has finished, so the
+# engine that runs it must stay alive too.
+engine:
+  persistent: true

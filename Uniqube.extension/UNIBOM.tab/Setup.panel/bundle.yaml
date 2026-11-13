@@ -1,0 +1,6 @@
+title: Setup
+tooltip: Check the model and edit the UNIBOM rules before taking off quantities.
+author: Uniqube
+layout:
+  - CheckModel
+  - RulesFolder

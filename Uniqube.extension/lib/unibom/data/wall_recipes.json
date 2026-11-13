@@ -1,0 +1,28 @@
+{
+  "_about": "Recipe mode: estimate LGS framing from walls before BIMSF has framed them. Formulas are rules.walls from superstructureRules.json v1.0. Names: L (wall length mm), H (wall height mm), openings (hosted doors + windows), stud_spacing_mm (from BIMSF PanelParams when present, else settings), P.<parameter> (settings.json). Junction studs are not counted yet (needs wall-join analysis).",
+  "version": 1,
+  "wall_sections": [
+    { "match": "\\(152-", "section": "600S162-54", "note": "152 mm stud walls" },
+    { "match": "\\(92-", "section": "362S162-54", "note": "92 mm stud walls" }
+  ],
+  "recipes": [
+    {
+      "id": "LGS-WALL-PANEL",
+      "version": 1,
+      "applies_to": "wall",
+      "vars": [
+        ["s", "stud_spacing_mm"],
+        ["n_p", "ceil(L / P.panel_max_length_mm)"],
+        ["L_p", "L / n_p"],
+        ["studs_regular", "n_p * (ceil(L_p / s) + 1)"],
+        ["studs_jamb", "openings * 2 * P.jamb_studs_per_side"],
+        ["nogging_rows", "floor((H - 1) / P.nogging_spacing_mm)"]
+      ],
+      "emits": [
+        { "item": "LGS-{section}", "role": "SV", "qty": { "nr": "studs_regular + studs_jamb", "m": "(studs_regular + studs_jamb) * H / 1000" } },
+        { "item": "LGS-{section}", "role": "TRACK", "qty": { "m": "2 * L / 1000" } },
+        { "item": "LGS-{section}", "role": "HB", "qty": { "m": "nogging_rows * L / 1000" } }
+      ]
+    }
+  ]
+}

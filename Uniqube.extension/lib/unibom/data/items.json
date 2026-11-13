@@ -1,0 +1,26 @@
+{
+  "_about": "UNIBOM item master. One row per buyable or makeable item. kg_per_m for SSMA sections from superstructureRules.json section_library_kg_per_m (SUPPLIER). Rates are deliberately absent: pricing stays in the estimate (costModel.ts).",
+  "version": 1,
+  "items": [
+    { "code": "LGS-600S162-33", "name": "LGS C-section 600S162-33 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 1.74, "source": "SUPPLIER" },
+    { "code": "LGS-600S162-43", "name": "LGS C-section 600S162-43 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 2.26, "source": "SUPPLIER" },
+    { "code": "LGS-600S162-54", "name": "LGS C-section 600S162-54 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 2.82, "source": "SUPPLIER" },
+    { "code": "LGS-600S162-68", "name": "LGS C-section 600S162-68 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 3.51, "source": "SUPPLIER" },
+    { "code": "LGS-600S162-97", "name": "LGS C-section 600S162-97 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 4.89, "source": "SUPPLIER" },
+    { "code": "LGS-362S162-33", "name": "LGS C-section 362S162-33 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 1.33, "source": "SUPPLIER" },
+    { "code": "LGS-362S162-43", "name": "LGS C-section 362S162-43 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 1.72, "source": "SUPPLIER" },
+    { "code": "LGS-362S162-54", "name": "LGS C-section 362S162-54 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 2.14, "source": "SUPPLIER" },
+    { "code": "LGS-1200S350-54", "name": "LGS C-joist 1200S350-54 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 5.90, "source": "SUPPLIER" },
+    { "code": "LGS-1200S350-68", "name": "LGS C-joist 1200S350-68 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 7.39, "source": "SUPPLIER" },
+    { "code": "LGS-1200S350-97", "name": "LGS C-joist 1200S350-97 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 10.43, "source": "SUPPLIER" },
+    { "code": "LGS-1400S350-54", "name": "LGS C-joist 1400S350-54 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 6.47, "source": "SUPPLIER" },
+    { "code": "LGS-1400S350-68", "name": "LGS C-joist 1400S350-68 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 8.11, "source": "SUPPLIER" },
+    { "code": "LGS-1400S350-97", "name": "LGS C-joist 1400S350-97 (SSMA)", "group": "LGS profile", "unit": "kg", "kg_per_m": 11.46, "source": "SUPPLIER" },
+    { "code": "STRAP-FS100x1.5", "name": "Flat strap 100 x 1.5", "group": "LGS strap", "unit": "kg", "kg_per_m": 1.18, "source": "PROPOSED", "note": "100 x 1.5 x 7.85 / 1000. Confirm with supplier." },
+    { "code": "STRAP-50x1.2", "name": "Flat strap 50 x 1.2", "group": "LGS strap", "unit": "kg", "kg_per_m": 0.47, "source": "SUPPLIER" },
+    { "code": "BOARD-12", "name": "Sheathing board 12 mm (material to confirm)", "group": "Board", "unit": "m2", "sheet_w_mm": 1200, "sheet_h_mm": 2400, "source": "PROPOSED" },
+    { "code": "BOARD-12.5", "name": "Sheathing board 12.5 mm (material to confirm)", "group": "Board", "unit": "m2", "sheet_w_mm": 1200, "sheet_h_mm": 2400, "source": "PROPOSED" },
+    { "code": "BOARD-16", "name": "Sheathing board 16 mm (material to confirm)", "group": "Board", "unit": "m2", "sheet_w_mm": 1200, "sheet_h_mm": 2400, "source": "PROPOSED" },
+    { "code": "SCREW-LGS", "name": "LGS self-drilling screws", "group": "Fixings", "unit": "nr", "source": "UNIQUBE" }
+  ]
+}

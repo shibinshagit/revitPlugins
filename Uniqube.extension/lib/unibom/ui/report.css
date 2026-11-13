@@ -1,0 +1,122 @@
+/* UNIBOM report - dark / orange.
+   Plain CSS for the IE11 engine of pyRevit's output window: no variables, no
+   grid, no flex. Every rule is scoped to .ub and overrides pyRevit's own
+   stylesheet (striped rows, .code, table borders). */
+
+body { background: #16171b !important; color: #e8eaee; margin: 0; }
+.ub { font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; color: #e8eaee;
+      background: #16171b; padding: 20px 24px 36px 24px; }
+.ub * { box-sizing: border-box; }
+.ub table { border-collapse: collapse; border-spacing: 0; width: 100%; }
+.ub table, .ub th, .ub td { border: 0; padding: 0; font-size: 13px; }
+.ub tr, .ub tr:nth-child(odd), .ub tr:nth-child(even) { background: transparent !important; }
+
+/* header --------------------------------------------------------------- */
+.ub-head { background: #1e2025; border: 1px solid #2f333c; border-bottom: 0;
+           border-radius: 12px 12px 0 0; padding: 16px 20px; }
+.ub .ub-headrow td { vertical-align: middle; }
+.ub .ub-mark-cell { width: 56px; }
+.ub-mark { display: inline-block; width: 42px; height: 42px; background: #f7931e; border-radius: 10px;
+           color: #16171b; font-weight: 700; font-size: 12.5px; line-height: 42px; text-align: center; }
+.ub-title { font-size: 19px; font-weight: 600; color: #ffffff; }
+.ub-sub { font-size: 12px; color: #8f96a3; margin-top: 2px; }
+.ub .ub-chips { text-align: right; }
+.ub-chip { display: inline-block; padding: 3px 10px; margin: 3px 0 3px 6px; border-radius: 11px;
+           background: #25282f; border: 1px solid #353944; color: #aab0bb; font-size: 11px; white-space: nowrap; }
+.ub-chip b { color: #ffb15c; font-weight: 600; }
+
+/* KPI strip ------------------------------------------------------------ */
+.ub-kpis { background: #1a1c21; border: 1px solid #2f333c; border-top: 2px solid #f7931e;
+           border-radius: 0 0 12px 12px; padding: 12px 10px 14px 10px; }
+.ub-kpi { display: inline-block; vertical-align: top; width: 172px; margin: 4px 5px;
+          background: #212329; border: 1px solid #2f333c; border-radius: 10px; padding: 11px 14px; }
+.ub-kpi-label { font-size: 10.5px; color: #8f96a3; text-transform: uppercase; letter-spacing: 0.5px; }
+.ub-kpi-value { font-size: 21px; font-weight: 600; color: #ffffff; margin-top: 3px; white-space: nowrap; }
+.ub-kpi-unit { font-size: 12px; color: #8f96a3; font-weight: 400; margin-left: 4px; }
+.ub-kpi-note { font-size: 11px; color: #737a87; margin-top: 2px; white-space: nowrap; overflow: hidden; }
+.ub-kpi.accent { border-color: #f7931e; background: #2a231b; }
+.ub-kpi.accent .ub-kpi-value { color: #ffb15c; }
+.ub-kpi.bad .ub-kpi-value { color: #ff7b6b; }
+.ub-kpi.warn .ub-kpi-value { color: #ffc163; }
+.ub-kpi.good .ub-kpi-value { color: #4fd1a1; }
+
+/* tabs ------------------------------------------------------------------- */
+.ub-tabs { margin: 22px 0 16px 0; border-bottom: 1px solid #2f333c; white-space: nowrap; }
+.ub-tab { display: inline-block; padding: 9px 16px 10px 16px; margin-right: 2px; cursor: pointer;
+          color: #8f96a3; font-size: 13px; font-weight: 600; border-bottom: 2px solid transparent;
+          margin-bottom: -1px; }
+.ub-tab:hover { color: #ffffff; }
+.ub-tab.on { color: #ffffff; border-bottom-color: #f7931e; }
+.ub-badge { display: inline-block; min-width: 18px; padding: 0 6px; margin-left: 4px; border-radius: 9px;
+            background: #2c3038; color: #aab0bb; font-size: 10.5px; line-height: 17px; text-align: center; }
+.ub-badge.bad { background: #4a2420; color: #ff8a7a; }
+.ub-badge.warn { background: #43321a; color: #ffc163; }
+.ub-badge.good { background: #1d3a30; color: #4fd1a1; }
+
+/* layout ----------------------------------------------------------------- */
+.ub .ub-grid td.ub-grid-l, .ub .ub-grid td.ub-grid-r { vertical-align: top; width: 50%; }
+.ub .ub-grid td.ub-grid-l { padding-right: 8px; }
+.ub .ub-grid td.ub-grid-r { padding-left: 8px; }
+
+/* cards ------------------------------------------------------------------ */
+.ub-card { background: #1e2025; border: 1px solid #2f333c; border-radius: 12px; margin-bottom: 16px;
+           overflow: hidden; }
+.ub-card-head { padding: 12px 16px 11px 16px; border-bottom: 1px solid #2a2d35; }
+.ub-card-title { font-size: 13.5px; font-weight: 600; color: #ffffff; }
+.ub-card-title:before { content: ""; display: inline-block; width: 3px; height: 13px; background: #f7931e;
+                        margin-right: 9px; vertical-align: -1px; border-radius: 2px; }
+.ub-card-aside { float: right; color: #8f96a3; font-size: 12px; margin-top: 1px; }
+.ub-card-body { padding: 14px 16px; }
+.ub-card-body.flush { padding: 0; }
+
+/* tables ----------------------------------------------------------------- */
+.ub .ub-table th { background: #23262d; color: #8f96a3; font-weight: 600; font-size: 10.5px;
+                   text-transform: uppercase; letter-spacing: 0.5px; text-align: left;
+                   padding: 8px 16px; border-bottom: 1px solid #2f333c; white-space: nowrap; }
+.ub .ub-table td { padding: 8px 16px; border-bottom: 1px solid #262930; color: #e3e6ea;
+                   background-color: #1e2025; vertical-align: middle; }
+.ub .ub-table tr:last-child td { border-bottom: 0; }
+.ub .ub-table tr:hover td { background-color: #23262d; }
+.ub .ub-table th.n, .ub .ub-table td.n { text-align: right; white-space: nowrap; }
+.ub .ub-table th.s, .ub .ub-table td.s { text-align: right; width: 1%; white-space: nowrap; }
+.ub .ub-table tr.grp td { background-color: #1a1c21; color: #f7931e; font-size: 10.5px; font-weight: 600;
+                          text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 16px; }
+.ub .ub-table tr.tot td { background-color: #24211c; color: #ffffff; font-weight: 600;
+                          border-top: 1px solid #4a3a26; }
+.ub .ub-table.kv td:first-child { color: #aab0bb; }
+.ub .ub-table.bars td { padding-top: 7px; padding-bottom: 7px; }
+.ub .ub-table.issues td { vertical-align: top; }
+
+.ub-code { color: #ffb15c; font-family: Consolas, "Segoe UI", monospace; font-size: 12px; white-space: nowrap; }
+.ub-dim { color: #6f7684; }
+.ub-neg { color: #ff8a7a; font-weight: 600; }
+.ub-pos { color: #4fd1a1; font-weight: 600; }
+
+/* share bars ------------------------------------------------------------- */
+.ub-bar { width: 100%; min-width: 120px; height: 8px; background: #2a2d35; border-radius: 4px; overflow: hidden; }
+.ub-bar-fill { height: 8px; background: #f7931e; border-radius: 4px; }
+
+/* links ------------------------------------------------------------------ */
+.ub a { color: #ffb15c; text-decoration: none; }
+.ub a:hover { color: #ffffff; }
+.ub a.ub-sel { display: inline-block; padding: 2px 10px; border: 1px solid #4f3b24; border-radius: 10px 0 0 10px;
+               background: #2a231b; color: #ffb15c; font-size: 11px; white-space: nowrap; }
+.ub a.ub-zoom { display: inline-block; padding: 2px 8px 2px 6px; border: 1px solid #4f3b24; border-left: 0;
+                border-radius: 0 10px 10px 0; background: #2a231b; color: #ffb15c; font-size: 11px; }
+.ub a.ub-sel:hover, .ub a.ub-zoom:hover { background: #f7931e; color: #16171b; }
+
+/* issues ----------------------------------------------------------------- */
+.ub-pill { display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 10px; font-weight: 600;
+           letter-spacing: 0.4px; white-space: nowrap; }
+.ub-pill.error { background: #3b1f1f; color: #ff8a7a; border: 1px solid #6b2f2a; }
+.ub-pill.warning { background: #3a2c17; color: #ffc163; border: 1px solid #6a4a1c; }
+.ub-pill.info { background: #23262d; color: #aab0bb; border: 1px solid #3a3f4a; }
+.ub-issue { padding: 5px 0; color: #d5d9df; font-size: 12.5px; }
+.ub-more { margin-top: 6px; font-size: 12px; }
+.ub-empty { color: #4fd1a1; padding: 6px 0; }
+.ub-note { color: #8f96a3; font-size: 12px; margin: -4px 2px 18px 2px; }
+
+.ub-foot { margin-top: 26px; padding-top: 12px; border-top: 1px solid #262930; color: #646b78; font-size: 11px; }
+
+/* single-panel pages (no tab bar) */
+.ub-kpis + .ub-panel { margin-top: 20px; }

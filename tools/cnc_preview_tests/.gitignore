@@ -1,0 +1,6 @@
+# Screenshots and build output from the test runs
+out/
+out_netcore/
+out_revit/
+netcore_host/bin/
+netcore_host/obj/

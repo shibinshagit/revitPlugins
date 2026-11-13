@@ -861,13 +861,17 @@ def _role_rank(role):
         return len(_ROLE_ORDER)
 
 
-def format_csv(job_name, records, prefix=""):
-    ordered = sorted(
+def order_records(records):
+    """Records in the order their COMPONENT rows are written."""
+    return sorted(
         records,
         key=lambda r: (_role_rank(r["role"]), _natural_key(r["label"])),
     )
+
+
+def format_csv(job_name, records, prefix=""):
     rows = [["DETAILS", "", job_name or ""]]
-    rows.extend(component_fields(rec, prefix) for rec in ordered)
+    rows.extend(component_fields(rec, prefix) for rec in order_records(records))
     return "\r\n".join(",".join(row) for row in rows) + "\r\n"
 
 
@@ -886,6 +890,16 @@ def suggest_filename(unit_name, section):
 # --- entry point ----------------------------------------------------------
 def export_unit(doc, unit, job_name=None):
     """Return (filename, csv_text, component_count) for one panel/truss."""
+    program = build_unit_program(doc, unit, job_name=job_name)
+    return program["filename"], program["text"], program["count"]
+
+
+def build_unit_program(doc, unit, job_name=None):
+    """The CNC program for one panel/truss, with its Revit members.
+
+    Returns {filename, text, count, records}. ``records`` is in COMPONENT
+    row order, so row N of the CSV came from ``records[N]["element"]``.
+    """
     records = build_member_records(doc, unit.get("members") or [])
     if not records:
         raise ValueError("no exportable framing in {}".format(unit.get("name")))
@@ -911,7 +925,12 @@ def export_unit(doc, unit, job_name=None):
     section = next((r["section"] for r in records if r["section"]), "")
     name = unit.get("name") or "Panel"
     text = format_csv(job_name, records, prefix=panel_prefix(name, truss))
-    return suggest_filename(name, section), text, len(records)
+    return {
+        "filename": suggest_filename(name, section),
+        "text": text,
+        "count": len(records),
+        "records": order_records(records),
+    }
 
 
 def export_assembly(doc, assembly, job_name=None):

@@ -1,0 +1,5 @@
+title: Reports
+tooltip: >-
+  Opens the folder where Run BOQ saves its CSV and HTML reports
+  (Documents/UNIBOM unless you chose another folder).
+author: Uniqube

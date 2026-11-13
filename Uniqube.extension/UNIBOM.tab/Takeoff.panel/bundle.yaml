@@ -1,0 +1,5 @@
+title: Takeoff
+tooltip: BOQ / BOM takeoff from BIMSF framing and walls.
+author: Uniqube
+layout:
+  - RunBOQ

@@ -30,8 +30,13 @@ from System.Windows.Threading import DispatcherTimer
 
 _DIR = os.path.dirname(__file__)
 _XAML = os.path.join(_DIR, "ui", "VibePanel.xaml")
-_LOGO_LIGHT = os.path.join(_DIR, "ui", "logo.png")
-_LOGO_DARK = os.path.join(_DIR, "ui", "logo.dark.png")
+try:
+    import uniqube_brand as _brand
+    _LOGO_LIGHT = _brand.LOGO_LIGHT
+    _LOGO_DARK = _brand.LOGO_DARK
+except Exception:
+    _LOGO_LIGHT = os.path.join(_DIR, "ui", "logo.png")
+    _LOGO_DARK = os.path.join(_DIR, "ui", "logo.dark.png")
 
 _MAX_TOOL_ROUNDS = 8
 
