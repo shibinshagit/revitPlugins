@@ -135,6 +135,94 @@ def geometry():
           preview.hit_test(program["components"], 280.0, 1800.0) is None)
 
 
+def profiles():
+    print("tooling drawn into the outline")
+    program = preview.parse_program(read(ELB))
+    by_label = dict((c["label"], c) for c in program["components"])
+    tbot, stud = by_label["ELB1-TBOT1"], by_label["ELB1-S1"]
+    flange = tbot["flange"]
+
+    plain = dict(tbot, ops=[])
+    polygon, web = preview.profile(plain, preview.cuts(plain))
+    check("no tooling: a plain rectangle", len(polygon) == 4 and len(web) == 2,
+          polygon)
+
+    bands = preview.cuts(tbot)
+    lips = [b for b in bands if b["name"] == "LIP NOTCH"]
+    check("every lip notch cuts the lip edge",
+          len(lips) == sum(1 for op in tbot["ops"] if op["name"] == "LIP NOTCH")
+          and all(b["edge"] == "lip" for b in lips))
+    notch = preview.band_polygon(tbot, lips[1])
+    ys = sorted(p[1] for p in notch)
+    check("bottom track notch is cut down from the lips",
+          all(abs(y - (flange - lips[1]["depth"])) < 0.01 for y in ys[:2])
+          and all(abs(y - flange) < 0.01 for y in ys[2:]), notch)
+    _polygon, web = preview.profile(tbot, bands)
+    check("bottom track underside stays straight",
+          all(abs(p[1]) < 0.01 for p in web), web)
+    square = preview.cuts(tbot, others=program["components"])
+    check("a notch for a square stud has square sides",
+          all(b["tilt"] == 0.0 for b in square if b["name"] == "LIP NOTCH"))
+
+    swages = [b for b in preview.cuts(stud) if b["name"] == "SWAGE"]
+    first = min(swages, key=lambda b: b["t0"])
+    check("swage near the end runs out to the end as one joggle",
+          first["t0"] == 0.0 and first["t1"] < flange, first)
+    check("swage presses both edges",
+          set(b["edge"] for b in swages) == set(["lip", "web"]))
+    box = preview.bounds([stud])
+    polygon, _web = preview.profile(stud, preview.cuts(stud))
+    check("profile stays inside the member outline",
+          all(box[0] - 0.01 <= p[0] <= box[2] + 0.01
+              and box[1] - 0.01 <= p[1] <= box[3] + 0.01 for p in polygon))
+    truss = preview.parse_program(read(RT))
+    parts = dict((c["label"], c) for c in truss["components"])
+    chord, web = parts["BC1-2"], parts["WB3-6"]
+    # WB3-6 slopes into the chord beside the vertical WB6-7 (575-616):
+    # their notches touch, so they are one cut.
+    joint = [b for b in preview.cuts(chord, others=truss["components"])
+             if b["name"] == "LIP NOTCH" and b["t0"] < 600.0 < b["t1"]]
+    check("touching notches are one cut", len(joint) == 1 and len(joint[0]["ops"]) == 3,
+          joint)
+    joint = joint[0]
+    # Where the sloping web's left edge crosses the middle of the lip band.
+    lip_y = chord["flange"] - joint["depth"] / 2.0
+    a, b = preview.outline(web)[0], preview.outline(web)[1]
+    left_edge = a[0] + (lip_y - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+    check("the cut starts at the sloping web, not past it",
+          abs(joint["t0"] - left_edge) < 8.0, (joint["t0"], left_edge))
+    check("and ends clear of the vertical web's far side",
+          abs(joint["t1"] - (616.12 + preview.NOTCH_CLEARANCE_MM)) < 0.05, joint["t1"])
+    stud_notch = [b for b in preview.cuts(tbot) if b["name"] == "LIP NOTCH"
+                  and b["t0"] < 536.0 < b["t1"]][0]
+    check("a notch leaves clearance either side of the stud",
+          abs(stud_notch["t0"] - (536.0 - flange / 2.0 - preview.NOTCH_CLEARANCE_MM)) < 0.01
+          and abs(stud_notch["t1"] - (536.0 + flange / 2.0 + preview.NOTCH_CLEARANCE_MM)) < 0.01,
+          (stud_notch["t0"], stud_notch["t1"]))
+    outer0, outer1, inner1, inner0 = preview.band_polygon(chord, joint)
+    side = (inner0[0] - outer0[0], inner0[1] - outer0[1])
+    check("its sloping end leans with the web",
+          abs(side[0] * web["uy"] - side[1] * web["ux"]) < 0.01 and abs(side[0]) > 1.0,
+          side)
+    check("its vertical end is square", abs(inner1[0] - outer1[0]) < 0.01,
+          (outer1, inner1))
+    check("without the other members the cut is square",
+          all(abs(b.get("tilt0", 0.0)) + abs(b.get("tilt1", 0.0)) == 0.0
+              for b in preview.cuts(chord) if b["name"] == "LIP NOTCH"))
+    for label in ("TC3-4", "TC4-5"):
+        top = parts[label]
+        tilts = []
+        for band in preview.cuts(top, others=truss["components"]):
+            if band["name"] == "LIP NOTCH":
+                tilts.extend([band["tilt0"], band["tilt1"]])
+        check(label + ": sloping chord notches lean too, sliders ignored",
+              any(abs(t) > 0.3 for t in tilts) and any(abs(t) < 0.1 for t in tilts), tilts)
+
+    check("shallow swages stay visible when zoomed out",
+          all(b["depth"] >= 5.0 for b in preview.cuts(stud, min_inset=5.0)
+              if b["name"] == "SWAGE"))
+
+
 def faults():
     print("faults are reported")
     good = ("COMPONENT,P1-S1,600S162-54(50),SV,NORMAL,1,1000.00,"
@@ -256,6 +344,7 @@ def writing():
 if __name__ == "__main__":
     production_files()
     geometry()
+    profiles()
     faults()
     formatting()
     writing()

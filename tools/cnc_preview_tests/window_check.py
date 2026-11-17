@@ -33,7 +33,9 @@ clr.AddReference("WindowsBase")
 from System import Action
 from System.IO import Directory, File, FileAccess, FileMode, FileShare, FileStream, Path
 from System.Threading import Thread
-from System.Windows import Int32Rect, Point
+from System.Windows import Int32Rect, Point, RoutedEventArgs
+from System.Windows.Controls.Primitives import ButtonBase
+from System.Windows.Input import Key
 from System.Windows.Media import PixelFormats
 from System.Windows.Media.Imaging import (
     BitmapFrame,
@@ -224,22 +226,47 @@ shot("03b_elb1_zoomed_drawing", window.viewport, 2)
 
 print("click in the drawing")
 window.stations_toggle.IsChecked = False
-window._fit(rebuild=True)
+check("Show whole panel offered while a member is selected",
+      str(window.show_panel_button.Visibility) == "Visible")
+window.show_panel_button.RaiseEvent(RoutedEventArgs(ButtonBase.ClickEvent))
 settle()
+check("Show whole panel clears the selection", window._selected is None, window._selected)
+check("and hides itself", str(window.show_panel_button.Visibility) == "Collapsed")
 tbot = window._entry_now["program"]["components"][3]
 mid = preview.point_at(tbot, 300.0)
 window._click(Point(mid[0] * window._scale + window._tx, -mid[1] * window._scale + window._ty))
 check("clicking the bottom track selects it", window._selected == 3, window._selected)
+shot("03c_track_alone_with_notches", window.viewport, 2)
+window._select(None)
+settle()
 op_point = [p for p in window._op_points if p[2] == 0][3]
 window._click(Point(op_point[0] + window._tx, op_point[1] + window._ty))
 check("clicking a marker selects its operation", (window._selected, window._selected_op) == (0, 3),
       (window._selected, window._selected_op))
+op_point = [p for p in window._op_points if p[2] == 0][3]
 window._hover(Point(op_point[0] + window._tx, op_point[1] + window._ty))
 check("hover names the operation and station", "LIP NOTCH" in window.hover_text.Text and "1198.56" in window.hover_text.Text,
       window.hover_text.Text)
 window._hide_tip()
+shot("03d_stud_alone_with_swages", window.viewport, 2)
+hidden = preview.point_at(tbot, 300.0)
+window._click(Point(hidden[0] * window._scale + window._tx, -hidden[1] * window._scale + window._ty))
+check("hidden members cannot be clicked; clicking off brings the panel back",
+      window._selected is None, window._selected)
+window._select(2)
+window._on_window_key(None, type("Args", (), {"Key": Key.Escape, "Handled": False})())
+check("Esc brings the panel back", window._selected is None, window._selected)
 window._click(Point(5.0, 5.0))
-check("clicking empty space clears the selection", window._selected is None)
+check("clicking empty space keeps the panel", window._selected is None)
+for name, x, y in (("03e_close_stud_foot", 536.0, 30.0), ("03f_close_noggin_crossing", 536.0, 1200.0)):
+    window._fit(rebuild=True)
+    settle()
+    sx, sy = x * window._scale + window._tx, -y * window._scale + window._ty
+    window._zoom_at(sx, sy, 12.0)
+    settle()
+    shot(name, window.viewport, 2)
+window._fit(rebuild=True)
+settle()
 
 print("truss")
 window.unit_list.SelectedItem = window._row_view(1)
@@ -263,6 +290,16 @@ window._zoom_at(200.0, size[1] / 2.0, 2.2)
 shot("05c_rt1_joint_stations", window.viewport, 2)
 window.stations_toggle.IsChecked = False
 window._on_view_option(None, None)
+for name, x, y in (("05d_rt1_top_chord_joint", 620.0, 690.0),
+                   ("05e_rt1_bottom_chord_joint", 560.0, 30.0)):
+    window._fit(rebuild=True)
+    settle()
+    sx, sy = x * window._scale + window._tx, -y * window._scale + window._ty
+    window._zoom_at(sx, sy, 1.0 / window._scale * 3.0)
+    settle()
+    shot(name, window.viewport, 2)
+window._fit(rebuild=True)
+settle()
 
 print("checks")
 window.unit_list.SelectedItem = window._row_view(2)

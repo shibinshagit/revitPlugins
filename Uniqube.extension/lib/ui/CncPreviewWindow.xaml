@@ -589,7 +589,11 @@
                                     ToolTip="Zoom in"/>
                             <Button x:Name="FitButton" Content="Fit" Padding="12,0"
                                     Style="{StaticResource SecondaryButton}"
-                                    ToolTip="Fit the whole panel (double-click the drawing)"/>
+                                    ToolTip="Fit the drawing (double-click the drawing)"/>
+                            <Button x:Name="ShowPanelButton" Content="Show whole panel" Padding="12,0"
+                                    Style="{StaticResource SecondaryButton}" Margin="4,0,0,0"
+                                    Visibility="Collapsed"
+                                    ToolTip="Clear the selected member and show every member (Esc)"/>
                         </StackPanel>
                     </Grid>
 

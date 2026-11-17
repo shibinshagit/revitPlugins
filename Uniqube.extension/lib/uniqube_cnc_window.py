@@ -67,6 +67,9 @@ from System.Windows.Media import (
     ColorConverter,
     FillRule,
     FontFamily,
+    Geometry,
+    GeometryCombineMode,
+    GeometryGroup,
     PenLineCap,
     PenLineJoin,
     RotateTransform,
@@ -132,6 +135,7 @@ OP_STYLE = {
 }
 OP_DEFAULT = ("#FF6B7280", "cross")
 _FILLED = ("dot", "lip", "web", "diamond")
+_SHAPED = ("bar", "lip", "web")
 _OP_BRUSH = {}
 
 
@@ -144,6 +148,16 @@ def _op_brush(name):
     if brush is None:
         brush = _brush(_op_style(name)[0])
         _OP_BRUSH[name] = brush
+    return brush
+
+
+def _cut_brush(name):
+    """Translucent operation colour for the material a cut removes."""
+    key = ("cut", name)
+    brush = _OP_BRUSH.get(key)
+    if brush is None:
+        brush = _brush("#73" + _op_style(name)[0][3:])
+        _OP_BRUSH[key] = brush
     return brush
 
 
@@ -393,6 +407,7 @@ class CncPreviewWindow(object):
         self.zoom_out_button = find("ZoomOutButton")
         self.zoom_in_button = find("ZoomInButton")
         self.fit_button = find("FitButton")
+        self.show_panel_button = find("ShowPanelButton")
         self.viewport = find("Viewport")
         self.scene = find("Scene")
         self.hover_tip = find("HoverTip")
@@ -472,6 +487,8 @@ class CncPreviewWindow(object):
         ):
             toggle.Click += guard(self._on_view_option)
         self.fit_button.Click += guard(lambda s, e: self._fit())
+        self.show_panel_button.Click += guard(lambda s, e: self._select(None))
+        self.window.PreviewKeyDown += guard(self._on_window_key)
         self.zoom_in_button.Click += guard(lambda s, e: self._zoom_centre(ZOOM_STEP))
         self.zoom_out_button.Click += guard(
             lambda s, e: self._zoom_centre(1.0 / ZOOM_STEP)
@@ -885,7 +902,7 @@ class CncPreviewWindow(object):
                 op = restore["op"]
                 if op is not None and op >= len(comp["ops"]):
                     op = None
-                self._select(comp["index"], op)
+                self._select(comp["index"], op, zoom=False)
                 return
 
     def _clear_program(self):
@@ -1004,7 +1021,6 @@ class CncPreviewWindow(object):
 
     def _on_problem_click(self, sender, args):
         self._select(sender.Tag)
-        self._zoom_to_member()
 
     def _fill_components(self, entry):
         components = entry["program"]["components"]
@@ -1086,6 +1102,7 @@ class CncPreviewWindow(object):
             self.member_title.Foreground = MUTED
             self.member_revit.Visibility = Visibility.Collapsed
             self.zoom_member_button.IsEnabled = False
+            self.show_panel_button.Visibility = Visibility.Collapsed
             self.select_revit_button.IsEnabled = False
             self.row_text.Text = ""
         else:
@@ -1114,6 +1131,7 @@ class CncPreviewWindow(object):
             )
             self.member_title.Foreground = TEXT
             self.zoom_member_button.IsEnabled = True
+            self.show_panel_button.Visibility = Visibility.Visible
             self.row_text.Text = comp["raw"]
             self._fill_member_revit(comp)
         self._syncing = True
@@ -1155,8 +1173,12 @@ class CncPreviewWindow(object):
         self.member_revit.Visibility = Visibility.Visible
         self.select_revit_button.IsEnabled = info.get("ref") is not None
 
-    def _select(self, index, op_index=None):
-        """Select a component (or None) everywhere: drawing and both tables."""
+    def _select(self, index, op_index=None, zoom=True):
+        """Select a component (or None) everywhere: drawing and both tables.
+
+        When a member is selected the canvas shows only that member. Pass
+        zoom=False when restoring a saved view so the camera is left alone.
+        """
         self._selected = index
         self._selected_op = op_index if index is not None else None
         self._syncing = True
@@ -1169,7 +1191,12 @@ class CncPreviewWindow(object):
         self._fill_member()
         if op_index is not None and self.operation_grid.SelectedItem is not None:
             self.operation_grid.ScrollIntoView(self.operation_grid.SelectedItem)
-        self._rebuild_scene()
+        if zoom and index is not None:
+            self._zoom_to_member(rebuild=True)
+        elif zoom and index is None:
+            self._fit(rebuild=True)
+        else:
+            self._rebuild_scene()
 
     def _on_component_row(self, sender, args):
         if self._syncing:
@@ -1327,7 +1354,7 @@ class CncPreviewWindow(object):
         width, height = self._viewport_size()
         self._zoom_at(width / 2.0, height / 2.0, factor)
 
-    def _zoom_to_member(self):
+    def _zoom_to_member(self, rebuild=False):
         comp = self._component()
         width, height = self._viewport_size()
         if comp is None or width < 40 or height < 40:
@@ -1342,6 +1369,7 @@ class CncPreviewWindow(object):
             scale,
             width / 2.0 - (box[0] + box[2]) / 2.0 * scale,
             height / 2.0 + (box[1] + box[3]) / 2.0 * scale,
+            rebuild=rebuild,
         )
 
     def _to_model(self, px, py):
@@ -1477,9 +1505,16 @@ class CncPreviewWindow(object):
             self._select(hit[0], hit[1])
             return
         x, y = self._to_model(position.X, position.Y)
-        index = preview.hit_test(
-            self._entry_now["program"]["components"], x, y, 3.0 / self._scale
+        selected = self._component()
+        # Only what is drawn can be picked; clicking off a lone member
+        # brings the whole panel back.
+        visible = (
+            [selected] if selected is not None
+            else self._entry_now["program"]["components"]
         )
+        index = preview.hit_test(visible, x, y, 3.0 / self._scale)
+        if index is None and selected is None:
+            return
         self._select(index)
 
     # ----------------------------------------------------------------- scene
@@ -1499,29 +1534,70 @@ class CncPreviewWindow(object):
         self.scene.Children.Add(path)
         return path
 
-    def _outlines(self, components, fill, thickness, edge):
-        """Member outlines, then a heavier line on each web side."""
+    def _outlines(self, components, fill, thickness, edge, shaped=False):
+        """Member outlines, then a heavier line on each web side.
+
+        ``shaped`` steps swages into the outline, cuts the notches out of
+        it (their sides leaning with the member they seat) and tints the
+        material the tooling removes.
+        """
         if not components:
             return
-        outline = StreamGeometry()
-        outline.FillRule = FillRule.Nonzero
-        context = outline.Open()
+        others = self._entry_now["program"]["components"] if shaped else None
+        min_inset = 2.0 / self._scale
+        members = GeometryGroup()
+        members.FillRule = FillRule.Nonzero
+        webs = StreamGeometry()
+        web_context = webs.Open()
+        groups = {}
         for comp in components:
-            corners = preview.outline(comp)
+            if shaped:
+                bands = preview.cuts(comp, min_inset, others)
+                corners, web = preview.profile(comp, bands)
+            else:
+                bands = []
+                corners = preview.outline(comp)
+                web = list(preview.web_edge(comp))
+            body = self._polygons([corners])
+            notches = [
+                preview.band_polygon(comp, band)
+                for band in bands if band["name"] in preview.NOTCHES
+            ]
+            if notches:
+                body = Geometry.Combine(
+                    body, self._polygons(notches), GeometryCombineMode.Exclude, None
+                )
+            members.Children.Add(body)
+            web_context.BeginFigure(self._pt(web[0]), False, False)
+            for point in web[1:]:
+                web_context.LineTo(self._pt(point), True, False)
+            for band in bands:
+                groups.setdefault(band["name"], []).append(
+                    preview.band_polygon(comp, band)
+                )
+        web_context.Close()
+
+        self._add_path(members, fill, INK, thickness)
+        if shaped:
+            # Clipped to the members, so the line stops at each notch; drawn
+            # twice as wide because the clip keeps only its inner half.
+            line = self._add_path(webs, None, INK, edge * 2.0)
+            line.Clip = members
+        else:
+            self._add_path(webs, None, INK, edge)
+        for name in sorted(groups):
+            self._add_path(self._polygons(groups[name]), _cut_brush(name))
+
+    def _polygons(self, polygons):
+        geometry = StreamGeometry()
+        geometry.FillRule = FillRule.Nonzero
+        context = geometry.Open()
+        for corners in polygons:
             context.BeginFigure(self._pt(corners[0]), True, True)
             for corner in corners[1:]:
                 context.LineTo(self._pt(corner), True, False)
         context.Close()
-        self._add_path(outline, fill, INK, thickness)
-
-        webs = StreamGeometry()
-        context = webs.Open()
-        for comp in components:
-            start, end = preview.web_edge(comp)
-            context.BeginFigure(self._pt(start), False, False)
-            context.LineTo(self._pt(end), True, False)
-        context.Close()
-        self._add_path(webs, None, INK, edge)
+        return geometry
 
     def _rebuild_scene(self):
         self.scene.Children.Clear()
@@ -1532,25 +1608,25 @@ class CncPreviewWindow(object):
             return
         components = entry["program"]["components"]
         selected = self._component()
+        # A selected member is shown alone so its tooling can be inspected;
+        # clearing the selection brings the whole panel back.
+        visible = [selected] if selected is not None else components
 
         # Studs and webs first, then tracks and chords over their ends.
+        fill = SELECT_FILL if selected is not None else PAPER
+        thickness = 1.6 if selected is not None else 1.0
+        edge = 3.0 if selected is not None else 2.2
+        shaped = bool(self.tooling_toggle.IsChecked)
         for layer in (0, 1, 2):
-            members = [
-                c
-                for c in components
-                if preview.draw_layer(c) == layer and c is not selected
-            ]
-            self._outlines(members, PAPER, 1.0, 2.2)
-        if selected is not None:
-            # Drawn last and whole, so its full cut length is visible.
-            self._outlines([selected], SELECT_FILL, 1.6, 3.0)
+            members = [c for c in visible if preview.draw_layer(c) == layer]
+            self._outlines(members, fill, thickness, edge, shaped)
 
         if self.dimensions_toggle.IsChecked:
-            self._draw_dimensions()
+            self._draw_dimensions(visible)
         if self.tooling_toggle.IsChecked:
-            self._draw_operations(components, selected)
+            self._draw_operations(visible, selected)
         if self.labels_toggle.IsChecked:
-            self._draw_labels(components, selected)
+            self._draw_labels(visible, selected)
 
     # -- operations
     def _frame(self, comp):
@@ -1583,9 +1659,11 @@ class CncPreviewWindow(object):
                     mx, my = cx + nx * (half - depth / 2.0), cy + ny * (half - depth / 2.0)
                 elif kind == "web":
                     mx, my = cx - nx * (half - depth / 2.0), cy - ny * (half - depth / 2.0)
-                groups.setdefault(op["name"], []).append(
-                    (kind, cx, cy, ux, uy, nx, ny, half, radius, depth)
-                )
+                # Notches and swages are drawn into the member outline.
+                if kind not in _SHAPED:
+                    groups.setdefault(op["name"], []).append(
+                        (kind, cx, cy, ux, uy, nx, ny, half, radius, depth)
+                    )
                 self._op_points.append((mx, my, comp["index"], op_index))
                 # Text is never written over a marker.
                 self._boxes.append(
@@ -1768,8 +1846,10 @@ class CncPreviewWindow(object):
             self._place(block, cx, cy, angle)
 
     # -- dimensions
-    def _draw_dimensions(self):
-        box = preview.overall_bounds(self._entry_now["program"]["components"])
+    def _draw_dimensions(self, components):
+        box = preview.overall_bounds(components)
+        if box is None:
+            return
         scale = self._scale
         left, right = box[0] * scale, box[2] * scale
         top, bottom = -box[3] * scale, -box[1] * scale
@@ -1829,6 +1909,11 @@ class CncPreviewWindow(object):
         if picked:
             self._out_dir = picked
             self._show_folder()
+
+    def _on_window_key(self, sender, args):
+        if args.Key == Key.Escape and self._component() is not None:
+            self._select(None)
+            args.Handled = True
 
     def _on_job_key(self, sender, args):
         if args.Key == Key.Enter:

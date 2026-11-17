@@ -315,6 +315,200 @@ def web_edge(comp):
     return offset_point(comp, 0.0, -half), offset_point(comp, comp["span"], -half)
 
 
+LIP_RETURN_MM = 12.7
+# A chord's lip notches for a sloping web sit this far past the joint
+# dimple, toward the web (Vertex BD truss files).
+TRUSS_LIP_OFFSETS = (19.13, 36.58)
+# Notches are drawn this much wider each side than the member they seat.
+NOTCH_CLEARANCE_MM = 2.0
+
+
+def _lean(station, dimples):
+    """+1 / -1 when a lip notch belongs to a sloping web joint, else 0."""
+    for dimple in dimples:
+        for offset in TRUSS_LIP_OFFSETS:
+            if abs(station - dimple - offset) < 0.1:
+                return 1
+            if abs(dimple - station - offset) < 0.1:
+                return -1
+    return 0
+
+
+def _band(edge, t0, t1, depth, op_index, name, span):
+    t0, t1 = max(0.0, t0), min(span, t1)
+    if t1 - t0 < 1e-6 or depth <= 0.0:
+        return None
+    return {"edge": edge, "t0": t0, "t1": t1, "depth": depth,
+            "op_index": op_index, "name": name, "tilt": 0.0}
+
+
+NOTCHES = ("LIP NOTCH", "WEB NOTCH")
+
+
+def _inward(comp, edge):
+    """Unit vector from a long edge toward the member centreline."""
+    side = comp["open_sign"] * (1.0 if edge == "lip" else -1.0)
+    return -comp["nx"] * side, -comp["ny"] * side
+
+
+def _tilt(comp, band, others):
+    """Along-member shift per mm inward, so a notch's sides follow the
+    member seated in it. 0 when that member is square to this one."""
+    half = comp["flange"] / 2.0
+    sign = 1.0 if band["edge"] == "lip" else -1.0
+    mid = (band["t0"] + band["t1"]) / 2.0
+    px, py = offset_point(comp, mid, sign * (half - band["depth"] / 2.0))
+    mx, my = _inward(comp, band["edge"])
+    best, best_across = None, None
+    for other in others:
+        if other["index"] == comp["index"] or other["span"] <= 0.0:
+            continue
+        # Members alongside this one (sliders, doubled chords) seat nothing.
+        if abs(other["ux"] * mx + other["uy"] * my) < 0.2:
+            continue
+        dx, dy = px - other["x0"], py - other["y0"]
+        along = dx * other["ux"] + dy * other["uy"]
+        if along < -comp["flange"] or along > other["span"] + comp["flange"]:
+            continue
+        across = abs(dx * other["nx"] + dy * other["ny"])
+        if across > (other["flange"] + comp["flange"]) / 2.0:
+            continue
+        if best_across is None or across < best_across:
+            best, best_across = other, across
+    if best is None:
+        return 0.0
+    cu = best["ux"] * comp["ux"] + best["uy"] * comp["uy"]
+    cm = best["ux"] * mx + best["uy"] * my
+    return max(-3.0, min(3.0, cu / cm))
+
+
+def cuts(comp, min_inset=0.0, others=None):
+    """Bands of each long edge that the tooling cuts away or presses in.
+
+    Each band is {edge: "lip"|"web", t0, t1, depth, tilt, op_index, name}
+    in mm along and across the member; t0..t1 is measured half way into
+    the cut. Notches are one flange wide plus NOTCH_CLEARANCE_MM each
+    side, centred on the station, except a
+    sloping web's pair on a truss chord: each of those runs from its
+    station back toward the joint dimple, which is where the web crosses
+    the lips. With ``others`` (the rest of the program) a notch's sides
+    lean with the member seated in it. A swage near an end runs out to
+    that end as a single joggle step. ``min_inset`` keeps shallow swages
+    visible when zoomed out.
+    """
+    span = comp["span"]
+    flange = comp["flange"]
+    limit = flange * 0.45
+    notch_depth = min(LIP_RETURN_MM, flange * 0.35)
+    swage_depth = min(limit, max(flange * 0.07, min_inset))
+    swage_band = flange * 0.6
+    dimples = [op["station"] for op in comp["ops"] if op["name"] == "DIMPLE"]
+    out = []
+    for index, op in enumerate(comp["ops"]):
+        name = op["name"]
+        s = max(0.0, min(span, op["station"]))
+        if name in ("LIP NOTCH", "WEB NOTCH"):
+            edge = "lip" if name == "LIP NOTCH" else "web"
+            lean = _lean(op["station"], dimples) if name == "LIP NOTCH" else 0
+            if lean > 0:
+                t0, t1 = s - flange, s
+            elif lean < 0:
+                t0, t1 = s, s + flange
+            else:
+                t0, t1 = s - flange / 2.0, s + flange / 2.0
+            out.append(_band(edge, t0, t1, notch_depth, index, name, span))
+        elif name == "SWAGE":
+            if s <= flange:
+                t0, t1 = 0.0, s + swage_band / 2.0
+            elif span - s <= flange:
+                t0, t1 = s - swage_band / 2.0, span
+            else:
+                t0, t1 = s - swage_band / 2.0, s + swage_band / 2.0
+            for edge in ("lip", "web"):
+                out.append(_band(edge, t0, t1, swage_depth, index, name, span))
+    out = [band for band in out if band is not None]
+    for band in out:
+        if band["name"] not in NOTCHES:
+            continue
+        if others:
+            band["tilt"] = _tilt(comp, band, others)
+        # Clearance square to the seated member's side, whatever its lean.
+        gap = NOTCH_CLEARANCE_MM * math.sqrt(1.0 + band["tilt"] ** 2)
+        band["t0"] = max(0.0, band["t0"] - gap)
+        band["t1"] = min(span, band["t1"] + gap)
+    return [b for b in out if b["name"] not in NOTCHES] + _merge_notches(out)
+
+
+def _merge_notches(bands):
+    """Overlapping notches on one edge become one cut, each end leaning
+    with the member seated there, so no sliver is left between them."""
+    merged = []
+    for edge in ("lip", "web"):
+        notches = sorted(
+            (b for b in bands if b["name"] in NOTCHES and b["edge"] == edge),
+            key=lambda b: b["t0"],
+        )
+        for band in notches:
+            last = merged[-1] if merged and merged[-1]["edge"] == edge else None
+            if last is not None and band["t0"] <= last["t1"] + 0.5:
+                if band["t1"] > last["t1"]:
+                    last["t1"], last["tilt1"] = band["t1"], band["tilt"]
+                last["depth"] = max(last["depth"], band["depth"])
+                last["ops"].append(band["op_index"])
+                continue
+            band = dict(band, tilt0=band["tilt"], tilt1=band["tilt"],
+                        ops=[band["op_index"]])
+            merged.append(band)
+    return merged
+
+
+def _edge_points(comp, bands, sign):
+    span = comp["span"]
+    half = comp["flange"] / 2.0
+    stops = sorted(set([0.0, span] + [b["t0"] for b in bands] + [b["t1"] for b in bands]))
+    points = []
+    for a, b in zip(stops, stops[1:]):
+        if b - a < 1e-9:
+            continue
+        mid = (a + b) / 2.0
+        depth = max([band["depth"] for band in bands
+                     if band["t0"] <= mid <= band["t1"]] or [0.0])
+        for t in (a, b):
+            p = offset_point(comp, t, sign * (half - depth))
+            if not points or abs(points[-1][0] - p[0]) > 1e-9 \
+                    or abs(points[-1][1] - p[1]) > 1e-9:
+                points.append(p)
+    return points
+
+
+def profile(comp, bands):
+    """(outline polygon, web edge polyline) with the swages stepped in.
+
+    Notches are left out: they are cut from this outline with
+    ``band_polygon`` so their sides can lean.
+    """
+    pressed = [b for b in bands if b["name"] not in NOTCHES]
+    lip = _edge_points(comp, [b for b in pressed if b["edge"] == "lip"], 1.0)
+    web = _edge_points(comp, [b for b in pressed if b["edge"] == "web"], -1.0)
+    return lip + list(reversed(web)), web
+
+
+def band_polygon(comp, band):
+    """The four corners of the material a band removes (outer edge first)."""
+    half = comp["flange"] / 2.0
+    sign = 1.0 if band["edge"] == "lip" else -1.0
+    outer, inner = sign * half, sign * (half - band["depth"])
+    tilt = band.get("tilt", 0.0)
+    shift0 = band.get("tilt0", tilt) * band["depth"] / 2.0
+    shift1 = band.get("tilt1", tilt) * band["depth"] / 2.0
+    return [
+        offset_point(comp, band["t0"] - shift0, outer),
+        offset_point(comp, band["t1"] - shift1, outer),
+        offset_point(comp, band["t1"] + shift1, inner),
+        offset_point(comp, band["t0"] + shift0, inner),
+    ]
+
+
 def bounds(components):
     """(min_x, min_y, max_x, max_y) of every member outline, or None."""
     xs, ys = [], []
