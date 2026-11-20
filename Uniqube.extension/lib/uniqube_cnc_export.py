@@ -77,6 +77,7 @@ _OP_PRIORITY = {
 
 # Role classes -------------------------------------------------------------
 TRACK_ROLES = ("TBOT", "TTOP", "BottomChord", "TopChord")
+WALL_TRACK_ROLES = ("TBOT", "TTOP")
 END_VERTICAL_ROLES = ("EV",)
 TRUSS_ROLES = ("BottomChord", "TopChord", "Web", "Support")
 TRUSS_CHORD_ROLES = ("BottomChord", "TopChord")
@@ -241,6 +242,33 @@ def _is_track(role):
     return role in TRACK_ROLES
 
 
+def _is_level(dx, dy):
+    """Within about 11 degrees of horizontal."""
+    return abs(dy) <= 0.2 * math.hypot(dx, dy)
+
+
+def _is_inclined(rec):
+    """Neither level nor upright: a brace or a sloping truss web."""
+    dx, dy = rec["x1"] - rec["x0"], rec["y1"] - rec["y0"]
+    return not _is_level(dx, dy) and not _is_level(dy, dx)
+
+
+def _chamfer_inclined_ends(records):
+    """END_TRUSS at both ends of every inclined member, as Vertex BD writes
+    on truss webs: the machine chamfers the end corners so they clear the
+    member they land on."""
+    for rec in records:
+        if _is_inclined(rec):
+            ops = list(rec["ops"]) + [(OP_END_TRUSS, 0.0), (OP_END_TRUSS, rec["length"])]
+            rec["ops"] = _finish_operations(ops, rec["length"])
+
+
+def _rec_is_track(rec):
+    """A track by role and by shape: a wall member labelled TTOP / TBOT
+    that runs on the diagonal is a brace, whatever its label says."""
+    return _is_track(rec["role"]) and not rec.get("brace")
+
+
 def _is_end_vertical(role):
     return role in END_VERTICAL_ROLES
 
@@ -360,6 +388,10 @@ def _natural_key(text):
 # --- local frame ----------------------------------------------------------
 def _pick_reference(members):
     """Bottom track / bottom chord defines the local X axis."""
+    def level(el):
+        p0, p1, _ = _curve_ends(el)
+        return _is_level(math.hypot(p1.X - p0.X, p1.Y - p0.Y), p1.Z - p0.Z)
+
     bottoms = [
         el for el in members if _role_of(el) in ("TBOT", "BottomChord")
     ]
@@ -367,6 +399,8 @@ def _pick_reference(members):
         bottoms = [el for el in members if _is_track(_role_of(el))]
     if not bottoms:
         return None
+    # A diagonal brace mislabelled TBOT must not become the panel axis.
+    bottoms = [el for el in bottoms if level(el)] or bottoms
     return max(bottoms, key=lambda el: _curve_ends(el)[2])
 
 
@@ -473,7 +507,10 @@ def build_member_records(doc, members):
         lx1, ly1 = _to_local(origin, ux, uy, z0, p1)
         role = _role_of(el)
         is_vertical = abs(ly1 - ly0) > abs(lx1 - lx0)
-        lx0, ly0, lx1, ly1 = _normalize_ends(role, lx0, ly0, lx1, ly1)
+        brace = role in WALL_TRACK_ROLES and not _is_level(lx1 - lx0, ly1 - ly0)
+        lx0, ly0, lx1, ly1 = _normalize_ends(
+            "" if brace else role, lx0, ly0, lx1, ly1
+        )
         length = math.hypot(lx1 - lx0, ly1 - ly0)
         if length < _EPS:
             continue
@@ -502,6 +539,7 @@ def build_member_records(doc, members):
                 "y1": ly1,
                 "depth": _web_depth_mm(doc, el),
                 "vertical": is_vertical,
+                "brace": brace,
                 "sign": sign,
                 "ops": [],
             }
@@ -574,7 +612,7 @@ def _terminates_at(rec, station):
 
 def _receiver_rank(rec):
     """Lower wins when two members butt into each other at a corner."""
-    if _is_track(rec["role"]):
+    if _rec_is_track(rec):
         return 0
     if _is_end_vertical(rec["role"]):
         return 1
@@ -704,7 +742,7 @@ def build_operations(member, crossings_for_member, openings_for_member=None):
 
     # Members that butt into others are swaged near both ends so the
     # connection lies flat. Tracks run edge to edge and are not swaged.
-    if not _is_track(member["role"]) and length > 2 * SWAGE_END_OFFSET:
+    if not _rec_is_track(member) and length > 2 * SWAGE_END_OFFSET:
         ops.append((OP_SWAGE, SWAGE_END_OFFSET))
         ops.append((OP_SWAGE, length - SWAGE_END_OFFSET))
 
@@ -728,7 +766,7 @@ def build_operations(member, crossings_for_member, openings_for_member=None):
 
     # Revit structural openings punched through the member web.
     # Vertex BD writes SERVICE HOLE on studs/noggins and WEB HOLE on tracks.
-    hole_op = OP_WEB_HOLE if _is_track(member["role"]) else OP_SERVICE_HOLE
+    hole_op = OP_WEB_HOLE if _rec_is_track(member) else OP_SERVICE_HOLE
     for station in openings_for_member or []:
         ops.append((hole_op, station))
 
@@ -797,6 +835,35 @@ def _finish_operations(ops, length):
             continue
         cleaned.append((name, clamped))
     return cleaned
+
+
+def _seat_lip_notches(records, text, prefix):
+    """Slide each lip notch along its member to sit centred on a sloping
+    member (a brace) passing through it. The punch width is fixed, so
+    only the station moves. Uses the preview's geometry, so the file and
+    the drawing agree. True when any station moved."""
+    import uniqube_cnc_preview as preview
+
+    components = preview.parse_program(text)["components"]
+    moved = False
+    for rec, comp in zip(order_records(records), components):
+        if comp["label"] != component_label(prefix, rec["label"]):
+            return moved
+        if len(comp["ops"]) != len(rec["ops"]):
+            continue
+        ops = list(rec["ops"])
+        changed = False
+        for index, (name, _station) in enumerate(ops):
+            if name != OP_LIP_NOTCH:
+                continue
+            station = preview.seated_station(comp, index, components)
+            if station is not None and abs(station - comp["ops"][index]["station"]) > 0.05:
+                ops[index] = (OP_LIP_NOTCH, station)
+                changed = True
+        if changed:
+            rec["ops"] = _finish_operations(ops, rec["length"])
+            moved = True
+    return moved
 
 
 # --- formatting -----------------------------------------------------------
@@ -921,10 +988,14 @@ def build_unit_program(doc, unit, job_name=None):
                 crossings.get(rec["id"], []),
                 openings.get(rec["id"], []),
             )
+    _chamfer_inclined_ends(records)
 
     section = next((r["section"] for r in records if r["section"]), "")
     name = unit.get("name") or "Panel"
-    text = format_csv(job_name, records, prefix=panel_prefix(name, truss))
+    prefix = panel_prefix(name, truss)
+    text = format_csv(job_name, records, prefix=prefix)
+    if not truss and _seat_lip_notches(records, text, prefix):
+        text = format_csv(job_name, records, prefix=prefix)
     return {
         "filename": suggest_filename(name, section),
         "text": text,

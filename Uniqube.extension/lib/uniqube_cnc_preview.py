@@ -18,6 +18,7 @@ _LENGTH_TOL_MM = 1.5
 _STATION_TOL_MM = 0.01
 
 COVER_ROLES = ("TBOT", "TTOP", "BOTTOMCHORD", "TOPCHORD")
+WALL_TRACK_ROLES = ("TBOT", "TTOP")
 ORIENTATIONS = ("NORMAL", "INVERTED")
 
 # Display order for tooling totals; anything else follows alphabetically.
@@ -321,6 +322,8 @@ LIP_RETURN_MM = 12.7
 TRUSS_LIP_OFFSETS = (19.13, 36.58)
 # Notches are drawn this much wider each side than the member they seat.
 NOTCH_CLEARANCE_MM = 2.0
+# END_TRUSS: drawn as a 45 degree chamfer this long on each end corner.
+END_CHAMFER_MM = 12.7
 
 
 def _lean(station, dimples):
@@ -339,7 +342,7 @@ def _band(edge, t0, t1, depth, op_index, name, span):
     if t1 - t0 < 1e-6 or depth <= 0.0:
         return None
     return {"edge": edge, "t0": t0, "t1": t1, "depth": depth,
-            "op_index": op_index, "name": name, "tilt": 0.0}
+            "op_index": op_index, "name": name}
 
 
 NOTCHES = ("LIP NOTCH", "WEB NOTCH")
@@ -351,13 +354,19 @@ def _inward(comp, edge):
     return -comp["nx"] * side, -comp["ny"] * side
 
 
-def _tilt(comp, band, others):
-    """Along-member shift per mm inward, so a notch's sides follow the
-    member seated in it. 0 when that member is square to this one."""
+def _strip(comp, band):
+    """(low, high) offsets of the band's strip, lip side positive."""
     half = comp["flange"] / 2.0
-    sign = 1.0 if band["edge"] == "lip" else -1.0
+    if band["edge"] == "lip":
+        return half - band["depth"], half
+    return -half, band["depth"] - half
+
+
+def _seated(comp, band, others):
+    """The member passing through a notch, or None."""
+    low, high = _strip(comp, band)
     mid = (band["t0"] + band["t1"]) / 2.0
-    px, py = offset_point(comp, mid, sign * (half - band["depth"] / 2.0))
+    px, py = offset_point(comp, mid, (low + high) / 2.0)
     mx, my = _inward(comp, band["edge"])
     best, best_across = None, None
     for other in others:
@@ -375,24 +384,75 @@ def _tilt(comp, band, others):
             continue
         if best_across is None or across < best_across:
             best, best_across = other, across
-    if best is None:
-        return 0.0
-    cu = best["ux"] * comp["ux"] + best["uy"] * comp["uy"]
-    cm = best["ux"] * mx + best["uy"] * my
-    return max(-3.0, min(3.0, cu / cm))
+    return best
+
+
+def _clip(points, axis, limit, keep_above):
+    """Sutherland-Hodgman: the part of a polygon on one side of a line."""
+    def inside(p):
+        return p[axis] >= limit if keep_above else p[axis] <= limit
+    out = []
+    for i, cur in enumerate(points):
+        prev = points[i - 1]
+        if inside(cur) != inside(prev):
+            k = (limit - prev[axis]) / (cur[axis] - prev[axis])
+            out.append((prev[0] + k * (cur[0] - prev[0]), prev[1] + k * (cur[1] - prev[1])))
+        if inside(cur):
+            out.append(cur)
+    return out
+
+
+def _footprint(comp, band, seat):
+    """(first, last) station where ``seat`` crosses the band's strip."""
+    sx, sy = point_at(comp, 0.0)
+    side = comp["open_sign"]
+    local = []
+    for px, py in outline(seat):
+        dx, dy = px - sx, py - sy
+        local.append((dx * comp["ux"] + dy * comp["uy"],
+                      (dx * comp["nx"] + dy * comp["ny"]) * side))
+    low, high = _strip(comp, band)
+    local = _clip(_clip(local, 1, low, True), 1, high, False)
+    if not local:
+        return None
+    stations = [p[0] for p in local]
+    return min(stations), max(stations)
+
+
+def seated_station(comp, op_index, others):
+    """Station that centres a lip notch on the sloping member passing
+    through it, or None when that member is square to this one or absent.
+    The notch keeps its width; only its position changes."""
+    flange = comp["flange"]
+    s = comp["ops"][op_index]["station"]
+    band = _band("lip", s - flange / 2.0, s + flange / 2.0,
+                 min(LIP_RETURN_MM, flange * 0.35), op_index, "LIP NOTCH",
+                 comp["span"])
+    if band is None:
+        return None
+    seat = _seated(comp, band, others)
+    if seat is None:
+        return None
+    mx, my = _inward(comp, "lip")
+    if abs(seat["ux"] * mx + seat["uy"] * my) > 0.995:
+        return None
+    found = _footprint(comp, band, seat)
+    if found is None:
+        return None
+    return max(0.0, min(comp["span"], (found[0] + found[1]) / 2.0))
 
 
 def cuts(comp, min_inset=0.0, others=None):
     """Bands of each long edge that the tooling cuts away or presses in.
 
-    Each band is {edge: "lip"|"web", t0, t1, depth, tilt, op_index, name}
-    in mm along and across the member; t0..t1 is measured half way into
-    the cut. Notches are one flange wide plus NOTCH_CLEARANCE_MM each
-    side, centred on the station, except a
-    sloping web's pair on a truss chord: each of those runs from its
+    Each band is {edge: "lip"|"web", t0, t1, depth, op_index, name} in mm
+    along and across the member. Notches are square-sided and one flange
+    wide plus NOTCH_CLEARANCE_MM each side, centred on the station, except
+    a sloping web's pair on a truss chord: each of those runs from its
     station back toward the joint dimple, which is where the web crosses
-    the lips. With ``others`` (the rest of the program) a notch's sides
-    lean with the member seated in it. A swage near an end runs out to
+    the lips. With ``others`` (the rest of the program) such a pair
+    instead spans wherever the web crosses the notch depth, as the two
+    punches together clear it. A swage near an end runs out to
     that end as a single joggle step. ``min_inset`` keeps shallow swages
     visible when zoomed out.
     """
@@ -416,7 +476,10 @@ def cuts(comp, min_inset=0.0, others=None):
                 t0, t1 = s, s + flange
             else:
                 t0, t1 = s - flange / 2.0, s + flange / 2.0
-            out.append(_band(edge, t0, t1, notch_depth, index, name, span))
+            band = _band(edge, t0, t1, notch_depth, index, name, span)
+            if band is not None:
+                band["paired"] = lean != 0
+            out.append(band)
         elif name == "SWAGE":
             if s <= flange:
                 t0, t1 = 0.0, s + swage_band / 2.0
@@ -430,18 +493,24 @@ def cuts(comp, min_inset=0.0, others=None):
     for band in out:
         if band["name"] not in NOTCHES:
             continue
-        if others:
-            band["tilt"] = _tilt(comp, band, others)
-        # Clearance square to the seated member's side, whatever its lean.
-        gap = NOTCH_CLEARANCE_MM * math.sqrt(1.0 + band["tilt"] ** 2)
+        paired = band.pop("paired", False)
+        seat = _seated(comp, band, others) if others and paired else None
+        found = _footprint(comp, band, seat) if seat is not None else None
+        gap = NOTCH_CLEARANCE_MM
+        if found is not None:
+            band["t0"], band["t1"] = found
+            # Clearance square to the seated member's side, whatever its slope.
+            mx, my = _inward(comp, band["edge"])
+            cm = abs(seat["ux"] * mx + seat["uy"] * my)
+            gap /= max(cm, 0.2)
         band["t0"] = max(0.0, band["t0"] - gap)
         band["t1"] = min(span, band["t1"] + gap)
     return [b for b in out if b["name"] not in NOTCHES] + _merge_notches(out)
 
 
 def _merge_notches(bands):
-    """Overlapping notches on one edge become one cut, each end leaning
-    with the member seated there, so no sliver is left between them."""
+    """Overlapping notches on one edge become one cut, so no sliver is
+    left between them."""
     merged = []
     for edge in ("lip", "web"):
         notches = sorted(
@@ -451,13 +520,11 @@ def _merge_notches(bands):
         for band in notches:
             last = merged[-1] if merged and merged[-1]["edge"] == edge else None
             if last is not None and band["t0"] <= last["t1"] + 0.5:
-                if band["t1"] > last["t1"]:
-                    last["t1"], last["tilt1"] = band["t1"], band["tilt"]
+                last["t1"] = max(last["t1"], band["t1"])
                 last["depth"] = max(last["depth"], band["depth"])
                 last["ops"].append(band["op_index"])
                 continue
-            band = dict(band, tilt0=band["tilt"], tilt1=band["tilt"],
-                        ops=[band["op_index"]])
+            band = dict(band, ops=[band["op_index"]])
             merged.append(band)
     return merged
 
@@ -485,12 +552,52 @@ def profile(comp, bands):
     """(outline polygon, web edge polyline) with the swages stepped in.
 
     Notches are left out: they are cut from this outline with
-    ``band_polygon`` so their sides can lean.
+    ``band_polygon``.
     """
     pressed = [b for b in bands if b["name"] not in NOTCHES]
     lip = _edge_points(comp, [b for b in pressed if b["edge"] == "lip"], 1.0)
     web = _edge_points(comp, [b for b in pressed if b["edge"] == "web"], -1.0)
-    return lip + list(reversed(web)), web
+    return chamfered(comp, lip + list(reversed(web))), web
+
+
+def chamfer_mm(comp):
+    """Leg of each 45 degree corner an END_TRUSS cut takes off."""
+    return min(END_CHAMFER_MM, comp["flange"] * 0.3)
+
+
+def chamfered(comp, polygon):
+    """``polygon`` with both corners cut off each END_TRUSS end."""
+    ends = [op["station"] for op in comp["ops"] if op["name"] == "END_TRUSS"]
+    if not ends:
+        return polygon
+    span = comp["span"]
+    half = comp["flange"] / 2.0
+    leg = chamfer_mm(comp)
+    centre = point_at(comp, span / 2.0)
+    for end in set(0.0 if s < span / 2.0 else span for s in ends):
+        inward = leg if end == 0.0 else -leg
+        for side in (1.0, -1.0):
+            a = offset_point(comp, end, side * (half - leg))
+            b = offset_point(comp, end + inward, side * half)
+            polygon = _keep_side(polygon, a, b, centre)
+    return polygon
+
+
+def _keep_side(points, a, b, inside):
+    """The part of a polygon on the same side of line a-b as ``inside``."""
+    def side(p):
+        return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+    keep = 1.0 if side(inside) >= 0.0 else -1.0
+    out = []
+    for i, cur in enumerate(points):
+        prev = points[i - 1]
+        s0, s1 = side(prev) * keep, side(cur) * keep
+        if (s0 >= 0.0) != (s1 >= 0.0):
+            k = s0 / (s0 - s1)
+            out.append((prev[0] + k * (cur[0] - prev[0]), prev[1] + k * (cur[1] - prev[1])))
+        if s1 >= 0.0:
+            out.append(cur)
+    return out
 
 
 def band_polygon(comp, band):
@@ -498,14 +605,11 @@ def band_polygon(comp, band):
     half = comp["flange"] / 2.0
     sign = 1.0 if band["edge"] == "lip" else -1.0
     outer, inner = sign * half, sign * (half - band["depth"])
-    tilt = band.get("tilt", 0.0)
-    shift0 = band.get("tilt0", tilt) * band["depth"] / 2.0
-    shift1 = band.get("tilt1", tilt) * band["depth"] / 2.0
     return [
-        offset_point(comp, band["t0"] - shift0, outer),
-        offset_point(comp, band["t1"] - shift1, outer),
-        offset_point(comp, band["t1"] + shift1, inner),
-        offset_point(comp, band["t0"] + shift0, inner),
+        offset_point(comp, band["t0"], outer),
+        offset_point(comp, band["t1"], outer),
+        offset_point(comp, band["t1"], inner),
+        offset_point(comp, band["t0"], inner),
     ]
 
 
@@ -528,19 +632,32 @@ def overall_bounds(components):
     brace drawn at its full width pokes past the corners and would
     otherwise be measured as part of the panel.
     """
-    frame = [c for c in components if c["role"].upper() in COVER_ROLES]
+    frame = [c for c in components if is_cover(c)]
     return bounds(frame or components)
 
 
 def draw_layer(comp):
-    """Paint order: 0 studs and webs, 1 horizontal infill, 2 tracks / chords.
+    """Paint order: 0 diagonals (braces, truss webs), 1 studs, 2 horizontal
+    infill, 3 tracks / chords.
 
-    Tracks and chords wrap the members that butt into them, so they are
-    painted last and hide the stud ends, as in a fabrication elevation.
+    Each member is painted over the ones that butt into it: tracks and
+    chords hide the stud ends, studs hide the ends of braces, as in a
+    fabrication elevation.
     """
-    if comp["role"].upper() in COVER_ROLES:
+    if is_cover(comp):
+        return 3
+    if abs(comp["uy"]) < 0.2:
         return 2
-    return 1 if abs(comp["uy"]) < 0.2 else 0
+    return 1 if abs(comp["ux"]) < 0.2 else 0
+
+
+def is_cover(comp):
+    """A track or chord. A wall member labelled TTOP / TBOT that runs on the
+    diagonal is a brace, whatever its label says; truss chords may slope."""
+    role = comp["role"].upper()
+    if role not in COVER_ROLES:
+        return False
+    return role not in WALL_TRACK_ROLES or abs(comp["uy"]) <= 0.2
 
 
 def distance_to(comp, px, py):

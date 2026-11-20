@@ -9,6 +9,7 @@ window uses to read a program back before it is written.
 from __future__ import print_function
 
 import io
+import math
 import os
 import sys
 
@@ -23,6 +24,7 @@ SAMPLES = os.path.join(
 )
 ELB = os.path.join(SAMPLES, "ELB-1_600S162-54(50)_.csv")
 RT = os.path.join(SAMPLES, "RT-1_362S162-54(50)_.csv")
+BIG5 = os.path.join(HERE, "fixtures", "BIG5_362S162-54(50)_.csv")
 
 FAILURES = []
 
@@ -127,7 +129,25 @@ def geometry():
           abs(y - by_label["ELB1-HB1"]["y0"]) < 0.01)
 
     check("tracks are painted over stud ends",
-          preview.draw_layer(tbot) == 2 and preview.draw_layer(stud) == 0)
+          preview.draw_layer(tbot) > preview.draw_layer(stud))
+
+    # BIG5 calibration panel: diagonal braces modelled with a TTOP label.
+    braced = preview.parse_program(
+        read(ELB) + "COMPONENT,ELB1-TTOP3,600S162-54(50),TTOP,INVERTED,1,912.00,"
+        "8.59,622.85,707.66,1208.56,152.40,DIMPLE,15.63\r\n"
+    )
+    brace = [c for c in braced["components"] if c["label"] == "ELB1-TTOP3"][0]
+    check("a diagonal labelled TTOP is not drawn as a track",
+          not preview.is_cover(brace) and preview.is_cover(tbot))
+    check("studs are painted over the ends of braces",
+          preview.draw_layer(brace) < preview.draw_layer(stud))
+    check("a diagonal TTOP does not change the panel size",
+          preview.summarize(braced)["extents"] == preview.summarize(program)["extents"],
+          preview.summarize(braced)["extents"])
+    truss = preview.parse_program(read(RT))
+    check("sloping truss chords still cover the webs",
+          all(preview.is_cover(c) for c in truss["components"]
+              if c["role"] in ("TopChord", "BottomChord")))
     check("click on a stud selects it", preview.hit_test(program["components"], 536.0, 1800.0) == stud["index"])
     check("click where a stud runs into the track selects the track",
           preview.hit_test(program["components"], 536.0, 10.0) == tbot["index"])
@@ -160,9 +180,12 @@ def profiles():
     _polygon, web = preview.profile(tbot, bands)
     check("bottom track underside stays straight",
           all(abs(p[1]) < 0.01 for p in web), web)
-    square = preview.cuts(tbot, others=program["components"])
-    check("a notch for a square stud has square sides",
-          all(b["tilt"] == 0.0 for b in square if b["name"] == "LIP NOTCH"))
+    seated = [b for b in preview.cuts(tbot, others=program["components"])
+              if b["name"] == "LIP NOTCH" and b["t0"] < 536.0 < b["t1"]][0]
+    check("a square stud's notch is the stud plus clearance",
+          abs(seated["t0"] - (536.0 - flange / 2.0 - preview.NOTCH_CLEARANCE_MM)) < 0.05
+          and abs(seated["t1"] - (536.0 + flange / 2.0 + preview.NOTCH_CLEARANCE_MM)) < 0.05,
+          (seated["t0"], seated["t1"]))
 
     swages = [b for b in preview.cuts(stud) if b["name"] == "SWAGE"]
     first = min(swages, key=lambda b: b["t0"])
@@ -185,12 +208,17 @@ def profiles():
     check("touching notches are one cut", len(joint) == 1 and len(joint[0]["ops"]) == 3,
           joint)
     joint = joint[0]
-    # Where the sloping web's left edge crosses the middle of the lip band.
-    lip_y = chord["flange"] - joint["depth"] / 2.0
-    a, b = preview.outline(web)[0], preview.outline(web)[1]
-    left_edge = a[0] + (lip_y - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
-    check("the cut starts at the sloping web, not past it",
-          abs(joint["t0"] - left_edge) < 8.0, (joint["t0"], left_edge))
+    # The sloping web crosses the lip band between its lip edge and the
+    # bottom of the notch; the square cut must clear both crossings.
+    edges = []
+    for a, b in ((preview.outline(web)[0], preview.outline(web)[1]),
+                 (preview.outline(web)[3], preview.outline(web)[2])):
+        for y in (chord["flange"], chord["flange"] - joint["depth"]):
+            edges.append(a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1]))
+    first = min(x for x in edges if x < 600.0)
+    check("the square cut clears the sloping web where it enters the lips",
+          first - 6.0 < joint["t0"] < first - preview.NOTCH_CLEARANCE_MM + 0.01,
+          (joint["t0"], first))
     check("and ends clear of the vertical web's far side",
           abs(joint["t1"] - (616.12 + preview.NOTCH_CLEARANCE_MM)) < 0.05, joint["t1"])
     stud_notch = [b for b in preview.cuts(tbot) if b["name"] == "LIP NOTCH"
@@ -200,24 +228,18 @@ def profiles():
           and abs(stud_notch["t1"] - (536.0 + flange / 2.0 + preview.NOTCH_CLEARANCE_MM)) < 0.01,
           (stud_notch["t0"], stud_notch["t1"]))
     outer0, outer1, inner1, inner0 = preview.band_polygon(chord, joint)
-    side = (inner0[0] - outer0[0], inner0[1] - outer0[1])
-    check("its sloping end leans with the web",
-          abs(side[0] * web["uy"] - side[1] * web["ux"]) < 0.01 and abs(side[0]) > 1.0,
-          side)
-    check("its vertical end is square", abs(inner1[0] - outer1[0]) < 0.01,
-          (outer1, inner1))
-    check("without the other members the cut is square",
-          all(abs(b.get("tilt0", 0.0)) + abs(b.get("tilt1", 0.0)) == 0.0
-              for b in preview.cuts(chord) if b["name"] == "LIP NOTCH"))
+    check("both ends of the cut are square, not leaning",
+          abs(inner0[0] - outer0[0]) < 0.01 and abs(inner1[0] - outer1[0]) < 0.01,
+          (outer0, inner0, outer1, inner1))
     for label in ("TC3-4", "TC4-5"):
         top = parts[label]
-        tilts = []
-        for band in preview.cuts(top, others=truss["components"]):
-            if band["name"] == "LIP NOTCH":
-                tilts.extend([band["tilt0"], band["tilt1"]])
-        check(label + ": sloping chord notches lean too, sliders ignored",
-              any(abs(t) > 0.3 for t in tilts) and any(abs(t) < 0.1 for t in tilts), tilts)
-
+        notches = [b for b in preview.cuts(top, others=truss["components"])
+                   if b["name"] == "LIP NOTCH"]
+        bare = [b for b in preview.cuts(top) if b["name"] == "LIP NOTCH"]
+        check(label + ": sloping chord notches fit their webs, sliders ignored",
+              len(notches) == len(bare)
+              and all(b["t1"] - b["t0"] < 4.0 * top["flange"] for b in notches),
+              [(round(b["t0"], 1), round(b["t1"], 1)) for b in notches])
     check("shallow swages stay visible when zoomed out",
           all(b["depth"] >= 5.0 for b in preview.cuts(stud, min_inset=5.0)
               if b["name"] == "SWAGE"))
@@ -341,10 +363,125 @@ def writing():
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def records_from(program, prefix):
+    """Export records as ``uniqube_cnc_export`` holds them, from a program."""
+    records = []
+    for comp in program["components"]:
+        records.append({
+            "label": comp["label"][len(prefix) + 1:], "section": comp["section"],
+            "role": comp["role"], "orient": comp["orient"], "qty": comp["qty"],
+            "length": comp["length"], "x0": comp["x0"], "y0": comp["y0"],
+            "x1": comp["x1"], "y1": comp["y1"], "depth": comp["depth"],
+            "ops": [(op["name"], op["station"]) for op in comp["ops"]],
+        })
+    return records
+
+
+def seated_notches():
+    """A lip notch slides to sit centred on a brace passing through it."""
+    import uniqube_cnc_export as export
+
+    print("lip notches seat sloping members")
+    # BIG5 (calibration panel) as exported before notches were seated.
+    records = records_from(preview.parse_program(read(BIG5)), "BIG5")
+    before = dict((r["label"], list(r["ops"])) for r in records)
+    text = export.format_csv("CALIBRATION", records, prefix="BIG5")
+    check("BIG5: notches move", export._seat_lip_notches(records, text, "BIG5"))
+    after = dict((r["label"], r["ops"]) for r in records)
+    moved = sorted(label for label in after if after[label] != before[label])
+    check("only members a brace lands on change", moved == ["E1", "E2", "TBOT1", "TTOP1"],
+          moved)
+
+    def notches(ops):
+        return [s for name, s in ops if name == "LIP NOTCH"]
+
+    def dimples(ops):
+        return [s for name, s in ops if name == "DIMPLE"]
+
+    check("the operation count stays the same",
+          all(len(after[k]) == len(before[k]) for k in after))
+    check("dimples stay where they were", all(dimples(after[k]) == dimples(before[k])
+                                              for k in after))
+    # Two braces meet at E1's mid-height in a V: their notches spread apart.
+    old, new = notches(before["E1"]), notches(after["E1"])
+    check("E1: each brace notch moves toward where the brace sits in the lips",
+          len(new) == 2 and 5.0 < old[0] - new[0] < 20.0 and 5.0 < new[1] - old[1] < 20.0,
+          (old, new))
+
+    panel = preview.parse_program(export.format_csv("CALIBRATION", records, prefix="BIG5"))
+    members = dict((c["label"], c) for c in panel["components"])
+    end = members["BIG5-E1"]
+    lip_x = preview.offset_point(end, 0.0, end["flange"] / 2.0)[0]
+    deep_x = preview.offset_point(end, 0.0, end["flange"] / 2.0 - preview.LIP_RETURN_MM)[0]
+    for label, station in zip(("BIG5-TTOP5", "BIG5-TTOP3"), new):
+        corners = preview.outline(members[label])
+        ys = []
+        for a, b in ((corners[0], corners[1]), (corners[3], corners[2])):
+            for x in (lip_x, deep_x):
+                ys.append(a[1] + (x - a[0]) * (b[1] - a[1]) / (b[0] - a[0]) - end["y0"])
+        check(label + ": its notch on E1 is centred on it",
+              abs(station - (min(ys) + max(ys)) / 2.0) < 0.05, (station, ys))
+    cut = [b for b in preview.cuts(end, others=panel["components"]) if b["name"] == "LIP NOTCH"]
+    check("the notch keeps its width",
+          all(abs(b["t1"] - b["t0"] - end["flange"] - 2 * preview.NOTCH_CLEARANCE_MM) < 0.05
+              for b in cut), [(b["t0"], b["t1"]) for b in cut])
+
+    # A wall of square studs is left exactly as it was.
+    elb = preview.parse_program(read(ELB))
+    plain = records_from(elb, "ELB1")
+    untouched = [list(r["ops"]) for r in plain]
+    check("square studs: no notch moves",
+          not export._seat_lip_notches(plain, read(ELB), "ELB1")
+          and [r["ops"] for r in plain] == untouched)
+
+    print("inclined members are chamfered at both ends")
+    export._chamfer_inclined_ends(records)
+    ends = dict((r["label"], [s for name, s in r["ops"] if name == "END_TRUSS"])
+                for r in records)
+    braces = ("TTOP3", "TTOP5", "TTOP7", "TTOP9")
+    check("every brace gets END_TRUSS at both ends, first and last",
+          all(ends[b] == [0.0, r["length"]] and r["ops"][0][0] == "END_TRUSS"
+              and r["ops"][-1][0] == "END_TRUSS"
+              for r in records for b in [r["label"]] if b in braces),
+          dict((b, ends[b]) for b in braces))
+    check("square members get none",
+          all(not ends[label] for label in ends if label not in braces),
+          [label for label in ends if ends[label] and label not in braces])
+    export._chamfer_inclined_ends(records)
+    check("running it twice adds nothing",
+          all(len(ends[r["label"]]) == len([1 for n, _s in r["ops"] if n == "END_TRUSS"])
+              for r in records))
+    rt = records_from(preview.parse_program(read(RT)), "")
+    before_rt = [list(r["ops"]) for r in rt]
+    export._chamfer_inclined_ends(rt)
+    check("RT-1 truss webs already match Vertex: unchanged",
+          [r["ops"] for r in rt] == before_rt)
+
+    text = export.format_csv("CALIBRATION", records, prefix="BIG5")
+    panel = preview.parse_program(text)
+    brace = [c for c in panel["components"] if c["label"] == "BIG5-TTOP3"][0]
+    polygon, _web = preview.profile(brace, [])
+    leg = preview.chamfer_mm(brace)
+    check("a chamfered member is drawn with its four end corners cut",
+          len(polygon) == 8, polygon)
+    tip = preview.point_at(brace, 0.0)
+    nearest = min(math.hypot(p[0] - tip[0], p[1] - tip[1]) for p in polygon)
+    half = brace["flange"] / 2.0
+    check("the chamfer is 45 degrees with the set leg",
+          abs(nearest - (half - leg)) < 0.01, (nearest, half - leg))
+    stud = [c for c in panel["components"] if c["label"] == "BIG5-S2"][0]
+    check("a square stud keeps square ends", len(preview.profile(stud, [])[0]) == 4)
+
+    with io.open(os.path.join(HERE, "out", "BIG5_seated.csv"), "w", encoding="utf-8",
+                 newline="") as handle:
+        handle.write(text)
+
+
 if __name__ == "__main__":
     production_files()
     geometry()
     profiles()
+    seated_notches()
     faults()
     formatting()
     writing()

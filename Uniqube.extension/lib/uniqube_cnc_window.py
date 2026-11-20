@@ -1538,7 +1538,7 @@ class CncPreviewWindow(object):
         """Member outlines, then a heavier line on each web side.
 
         ``shaped`` steps swages into the outline, cuts the notches out of
-        it (their sides leaning with the member they seat) and tints the
+        it (wide enough for the member they seat) and tints the
         material the tooling removes.
         """
         if not components:
@@ -1556,8 +1556,7 @@ class CncPreviewWindow(object):
                 corners, web = preview.profile(comp, bands)
             else:
                 bands = []
-                corners = preview.outline(comp)
-                web = list(preview.web_edge(comp))
+                corners, web = preview.profile(comp, bands)
             body = self._polygons([corners])
             notches = [
                 preview.band_polygon(comp, band)
@@ -1578,13 +1577,10 @@ class CncPreviewWindow(object):
         web_context.Close()
 
         self._add_path(members, fill, INK, thickness)
-        if shaped:
-            # Clipped to the members, so the line stops at each notch; drawn
-            # twice as wide because the clip keeps only its inner half.
-            line = self._add_path(webs, None, INK, edge * 2.0)
-            line.Clip = members
-        else:
-            self._add_path(webs, None, INK, edge)
+        # Clipped to the members, so the line stops at each notch and end
+        # chamfer; drawn twice as wide because the clip keeps only its inner half.
+        line = self._add_path(webs, None, INK, edge * 2.0)
+        line.Clip = members
         for name in sorted(groups):
             self._add_path(self._polygons(groups[name]), _cut_brush(name))
 
@@ -1617,7 +1613,7 @@ class CncPreviewWindow(object):
         thickness = 1.6 if selected is not None else 1.0
         edge = 3.0 if selected is not None else 2.2
         shaped = bool(self.tooling_toggle.IsChecked)
-        for layer in (0, 1, 2):
+        for layer in (0, 1, 2, 3):
             members = [c for c in visible if preview.draw_layer(c) == layer]
             self._outlines(members, fill, thickness, edge, shaped)
 
